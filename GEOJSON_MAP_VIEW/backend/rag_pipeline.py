@@ -79,6 +79,11 @@ class HybridGeospatialRAGPipeline:
                 "or set OLLAMA_MODEL explicitly."
             )
         self.fallback_model_preferences = [
+            "qwen2.5:14b",
+            "qwen2.5:7b",
+            "llama3.1:8b",
+            "mistral-small3.2:24b",
+            "gemma3:12b",
             "qwen3:8b",
             "qwen3:4b",
             "qwen3:1.7b",
@@ -195,13 +200,20 @@ class HybridGeospatialRAGPipeline:
     def _choose_default_model(self) -> Optional[str]:
         preferred = [
             "gpt-oss:20b",
+            "qwen2.5:14b",
+            "qwen2.5:7b",
+            "llama3.1:8b",
+            "mistral-small3.2:24b",
+            "gemma3:12b",
             "qwen3:14b",
             "qwen3:8b",
-            "llama3.3:70b",
-            "llama3.3:8b",
             "deepseek-r1:14b",
             "deepseek-r1:8b",
+            "llama3.3:70b",
+            "llama3.3:8b",
             "mistral-small3.1:24b",
+            "gemma3:4b",
+            "llama3.2:3b",
             "tinyllama:latest",
         ]
         model_ids = self.available_models
@@ -791,19 +803,22 @@ class HybridGeospatialRAGPipeline:
                     timeout=request_timeout,
                     extra_body={"options": {"num_predict": 80, "num_ctx": 1024}},
                 )
-                self.llm_model = model_name
-                content = response.choices[0].message.content if response.choices else None
+                content = self._normalize_message_text(
+                    response.choices[0].message.content if response.choices else None
+                )
                 if not content:
                     raise RuntimeError(f"Ollama returned an empty response for model '{model_name}'.")
+                self.llm_model = model_name
                 return content.strip()
             except Exception as exc:
                 last_exc = exc
-                if self._is_memory_error(exc) or self._is_model_unavailable_error(exc) or self._is_timeout_error(exc):
+                if (
+                    self._is_memory_error(exc)
+                    or self._is_model_unavailable_error(exc)
+                    or self._is_timeout_error(exc)
+                    or self._is_empty_response_error(exc)
+                ):
                     continue
-                raise RuntimeError(
-                    f"Ollama LLM call failed for model '{model_name}'. "
-                    f"Verify Ollama is running at {self.llm_base_url}. Error: {exc}"
-                ) from exc
 
         return self._fast_fallback_answer(
             question=question,
@@ -842,6 +857,24 @@ class HybridGeospatialRAGPipeline:
         return (size is None, float(size) if size is not None else 10_000.0, model_name)
 
     @staticmethod
+    def _normalize_message_text(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                    parts.append(str(item["text"]))
+                elif hasattr(item, "text") and getattr(item, "text"):
+                    parts.append(str(getattr(item, "text")))
+            return "".join(parts)
+        return str(value)
+
+    @staticmethod
     def _is_memory_error(exc: Exception) -> bool:
         text = str(exc).lower()
         memory_signals = [
@@ -869,6 +902,15 @@ class HybridGeospatialRAGPipeline:
             "timed out",
             "readtimeout",
             "apitimeouterror",
+        ]
+        return any(signal in text for signal in signals)
+
+    @staticmethod
+    def _is_empty_response_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        signals = [
+            "empty response",
+            "reasoning-only response",
         ]
         return any(signal in text for signal in signals)
 

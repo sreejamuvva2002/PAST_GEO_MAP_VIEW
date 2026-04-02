@@ -19,9 +19,20 @@ st.set_page_config(page_title="Hybrid Geospatial RAG Chatbot", layout="wide")
 
 BACKEND_CHAT_URL = os.getenv("BACKEND_CHAT_URL", "http://127.0.0.1:8000/chat")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+COUNTY_GEOJSON_PATH = PROJECT_ROOT / "data" / "Counties_Georgia.geojson"
 CHAT_TIMEOUT_SECONDS = int(os.getenv("BACKEND_CHAT_TIMEOUT", "120"))
 BACKEND_STARTUP_TIMEOUT_SECONDS = int(os.getenv("BACKEND_STARTUP_TIMEOUT", "35"))
 AUTO_BACKEND_PORTS = [8000, 8001, 8002]
+
+
+@st.cache_data(show_spinner=False)
+def load_county_geojson() -> dict | None:
+    if not COUNTY_GEOJSON_PATH.exists():
+        return None
+    try:
+        return json.loads(COUNTY_GEOJSON_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def health_url_from_chat_url(chat_url: str) -> str:
@@ -225,8 +236,6 @@ def render_map(records: List[Dict]) -> None:
         + df.get("county", pd.Series(index=df.index)).fillna("")
     ).str.strip(", ")
     df["tooltip_coord_source"] = df.get("coordinate_source", pd.Series(index=df.index)).fillna("unknown")
-    df["tooltip_map_weight"] = df["map_weight"].apply(lambda v: f"{float(v):.2f}")
-    df["tooltip_map_reason"] = df.get("map_weight_reason", pd.Series(index=df.index)).fillna("No map weighting metadata")
 
     color_lookup = {
         "coordinates_excel": [32, 128, 141, 200],
@@ -274,26 +283,36 @@ def render_map(records: List[Dict]) -> None:
         get_radius="radius",
     )
 
+    county_geojson = load_county_geojson()
+    county_layer = None
+    if county_geojson:
+        county_layer = pdk.Layer(
+            "GeoJsonLayer",
+            data=county_geojson,
+            stroked=True,
+            filled=False,
+            get_line_color=[24, 32, 44, 210],
+            line_width_min_pixels=3,
+        )
+
     tooltip = {
         "html": (
             "<b>{tooltip_company}</b><br/>"
             "Role: {tooltip_role}<br/>"
             "Location: {tooltip_location}<br/>"
-            "Map score: {tooltip_map_weight}<br/>"
-            "Coordinate source: {tooltip_coord_source}<br/>"
-            "Why: {tooltip_map_reason}"
+            "Coordinate source: {tooltip_coord_source}"
         ),
         "style": {"backgroundColor": "#16212b", "color": "white"},
     }
 
     st.markdown("**Supplier Coordinate Map**")
-    st.caption("Heat intensity and marker size are weighted by query relevance, proximity, and business priority.")
+    st.caption("Supplier locations shown with county borders.")
     st.pydeck_chart(
         pdk.Deck(
             map_style="light_no_labels",
             initial_view_state=view_state,
             tooltip=tooltip,
-            layers=[heatmap_layer, scatter_layer],
+            layers=[layer for layer in [county_layer, heatmap_layer, scatter_layer] if layer is not None],
         ),
         use_container_width=True,
     )
