@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import duckdb
 import faiss
@@ -17,7 +17,8 @@ EMBED_DIMENSION = 384
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-DEFAULT_EXCEL_PATH = DATA_DIR / "gnem_companies.xlsx"
+DEFAULT_EXCEL_PATH = DATA_DIR / "GNEM - Auto Landscape Lat Long Updated File (1).xlsx"
+LEGACY_EXCEL_PATH = DATA_DIR / "gnem_companies.xlsx"
 DEFAULT_GEOJSON_PATH = DATA_DIR / "Counties_Georgia.geojson"
 DEFAULT_COORDINATE_EXCEL_PATH = DATA_DIR / "company_coordinates.xlsx"
 DEFAULT_DB_PATH = DATA_DIR / "gnem.duckdb"
@@ -26,10 +27,23 @@ DEFAULT_METADATA_PATH = DATA_DIR / "vector_metadata.json"
 
 COMPANY_COLUMN_CANDIDATES = ["company", "company_name", "supplier", "supplier_name", "name"]
 LOCATION_COLUMN_CANDIDATES = ["location", "facility_location", "address", "city_county", "site"]
+ADDRESS_COLUMN_CANDIDATES = ["address", "street_address", "facility_address", "site_address"]
 CITY_COLUMN_CANDIDATES = ["city", "municipality", "town"]
 COUNTY_COLUMN_CANDIDATES = ["county", "county_name"]
 LATITUDE_COLUMN_CANDIDATES = ["latitude", "lat", "facility_latitude", "y"]
 LONGITUDE_COLUMN_CANDIDATES = ["longitude", "lon", "lng", "long", "facility_longitude", "x"]
+CITY_COUNTY_FALLBACK = {
+    "atlanta": "Fulton",
+    "alpharetta": "Fulton",
+    "augusta": "Richmond",
+    "bainbridge": "Decatur",
+    "columbus": "Muscogee",
+    "macon": "Bibb",
+    "marietta": "Cobb",
+    "savannah": "Chatham",
+    "statesboro": "Bulloch",
+    "west point": "Troup",
+}
 
 
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -71,11 +85,32 @@ def extract_city_county(location: object) -> Tuple[Optional[str], Optional[str]]
     county_match = re.search(r"([A-Za-z][A-Za-z\s\-']+?)\s+County", text, flags=re.IGNORECASE)
     county = county_match.group(1).strip().title() if county_match else None
 
+    if city and (city.lower().endswith(" county") or city.lower() in {"georgia", "ga"}):
+        city = None
+
     if not county and len(parts) > 1:
         maybe_county = parts[1].replace("County", "").strip()
         county = maybe_county.title() if maybe_county else None
 
     return city, county
+
+
+def extract_city_from_address(address: object) -> Optional[str]:
+    if pd.isna(address):
+        return None
+
+    text = str(address).strip()
+    if not text:
+        return None
+
+    match = re.search(
+        r"(?:^|,\s*)([A-Za-z][A-Za-z\s\-']+?),\s*(?:GA|Georgia)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def _iter_coordinates(geometry: dict) -> Iterable[Tuple[float, float]]:
@@ -91,6 +126,25 @@ def _iter_coordinates(geometry: dict) -> Iterable[Tuple[float, float]]:
             for ring in polygon:
                 for lon, lat in ring:
                     yield float(lat), float(lon)
+
+
+def _geometry_rings(geometry: dict) -> Iterable[List[List[Tuple[float, float]]]]:
+    geom_type = geometry.get("type")
+    coords = geometry.get("coordinates", [])
+
+    if geom_type == "Polygon":
+        rings = []
+        for ring in coords:
+            rings.append([(float(lon), float(lat)) for lon, lat in ring])
+        if rings:
+            yield rings
+    elif geom_type == "MultiPolygon":
+        for polygon in coords:
+            rings = []
+            for ring in polygon:
+                rings.append([(float(lon), float(lat)) for lon, lat in ring])
+            if rings:
+                yield rings
 
 
 def _mean_lat_lon(points: List[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
@@ -127,6 +181,107 @@ def load_county_centroids(geojson_path: Path) -> Dict[str, Tuple[float, float]]:
     return centroids
 
 
+def load_county_geometries(geojson_path: Path) -> List[dict]:
+    with geojson_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    geometries: List[dict] = []
+    for feature in payload.get("features", []):
+        props = feature.get("properties", {}) or {}
+        county_name = (
+            props.get("NAME10")
+            or props.get("NAME")
+            or props.get("NAMELSAD10", "").replace("County", "").strip()
+        )
+        if not county_name:
+            continue
+
+        polygons = list(_geometry_rings(feature.get("geometry", {}) or {}))
+        if not polygons:
+            continue
+
+        lon_values = [lon for polygon in polygons for ring in polygon for lon, _ in ring]
+        lat_values = [lat for polygon in polygons for ring in polygon for _, lat in ring]
+        geometries.append(
+            {
+                "county": str(county_name).strip().title(),
+                "county_key": str(county_name).strip().lower(),
+                "polygons": polygons,
+                "bbox": (
+                    min(lon_values),
+                    min(lat_values),
+                    max(lon_values),
+                    max(lat_values),
+                ),
+            }
+        )
+    return geometries
+
+
+def _point_on_segment(lon: float, lat: float, a: Tuple[float, float], b: Tuple[float, float]) -> bool:
+    ax, ay = a
+    bx, by = b
+    cross = (lat - ay) * (bx - ax) - (lon - ax) * (by - ay)
+    if abs(cross) > 1e-10:
+        return False
+    dot = (lon - ax) * (bx - ax) + (lat - ay) * (by - ay)
+    if dot < 0:
+        return False
+    squared_len = (bx - ax) ** 2 + (by - ay) ** 2
+    return dot <= squared_len + 1e-10
+
+
+def _point_in_ring(lon: float, lat: float, ring: Sequence[Tuple[float, float]]) -> bool:
+    if len(ring) < 3:
+        return False
+
+    inside = False
+    prev = ring[-1]
+    for curr in ring:
+        if _point_on_segment(lon, lat, prev, curr):
+            return True
+        xi, yi = curr
+        xj, yj = prev
+        intersects = ((yi > lat) != (yj > lat)) and (
+            lon < (xj - xi) * (lat - yi) / ((yj - yi) + 1e-15) + xi
+        )
+        if intersects:
+            inside = not inside
+        prev = curr
+    return inside
+
+
+def _point_in_county_polygons(lon: float, lat: float, polygons: Sequence[Sequence[Tuple[float, float]]]) -> bool:
+    for rings in polygons:
+        if not rings:
+            continue
+        if not _point_in_ring(lon, lat, rings[0]):
+            continue
+        if any(_point_in_ring(lon, lat, hole) for hole in rings[1:]):
+            continue
+        return True
+    return False
+
+
+def infer_county_from_point(
+    lat: Optional[float],
+    lon: Optional[float],
+    county_geometries: Sequence[dict],
+) -> Optional[str]:
+    if lat is None or lon is None:
+        return None
+
+    lat_f = float(lat)
+    lon_f = float(lon)
+    for county in county_geometries:
+        min_lon, min_lat, max_lon, max_lat = county["bbox"]
+        if not (min_lon <= lon_f <= max_lon and min_lat <= lat_f <= max_lat):
+            continue
+        if _point_in_county_polygons(lon_f, lat_f, county["polygons"]):
+            return str(county["county"])
+    return None
+
+
 def _safe_float(value: object) -> Optional[float]:
     if pd.isna(value):
         return None
@@ -158,6 +313,7 @@ def _detect_coordinate_columns(df: pd.DataFrame) -> Optional[Dict[str, str]]:
         "longitude": lon_col,
     }
     optional_pairs = {
+        "address": ADDRESS_COLUMN_CANDIDATES,
         "location": LOCATION_COLUMN_CANDIDATES,
         "city": CITY_COLUMN_CANDIDATES,
         "county": COUNTY_COLUMN_CANDIDATES,
@@ -219,7 +375,7 @@ def load_coordinate_enrichment(workbook_path: Optional[Path]) -> Tuple[pd.DataFr
             detected["latitude"]: "coord_latitude",
             detected["longitude"]: "coord_longitude",
         }
-        for optional_key in ("location", "city", "county"):
+        for optional_key in ("address", "location", "city", "county"):
             optional_col = detected.get(optional_key)
             if optional_col:
                 rename_map[optional_col] = f"coord_{optional_key}"
@@ -232,6 +388,8 @@ def load_coordinate_enrichment(workbook_path: Optional[Path]) -> Tuple[pd.DataFr
             coords["coord_location_key"] = coords["coord_location"].apply(normalize_match_key)
         else:
             coords["coord_location_key"] = ""
+        if "coord_address" not in coords.columns:
+            coords["coord_address"] = ""
 
         coords["coord_latitude"] = pd.to_numeric(coords["coord_latitude"], errors="coerce")
         coords["coord_longitude"] = pd.to_numeric(coords["coord_longitude"], errors="coerce")
@@ -254,6 +412,7 @@ def attach_coordinates(
     df: pd.DataFrame,
     county_centroids: Dict[str, Tuple[float, float]],
     coordinate_df: Optional[pd.DataFrame] = None,
+    county_geometries: Optional[Sequence[dict]] = None,
 ) -> pd.DataFrame:
     out = df.copy()
     cities: List[Optional[str]] = []
@@ -270,6 +429,8 @@ def attach_coordinates(
         out["longitude"] = pd.to_numeric(out["longitude"], errors="coerce")
     else:
         out["longitude"] = np.nan
+    if "address" not in out.columns:
+        out["address"] = ""
 
     out["company_key"] = out.get("company", "").apply(normalize_match_key)
     out["location_key"] = out.get("location", "").apply(normalize_match_key)
@@ -282,7 +443,10 @@ def attach_coordinates(
             subset=["coord_company_key", "coord_location_key"],
             keep="first",
         )
-        company_coords = coordinate_df.sort_values(["coord_company_key"]).drop_duplicates(
+        company_counts = coordinate_df["coord_company_key"].value_counts()
+        unique_company_keys = set(company_counts[company_counts == 1].index.tolist())
+        company_coords = coordinate_df[coordinate_df["coord_company_key"].isin(unique_company_keys)].copy()
+        company_coords = company_coords.sort_values(["coord_company_key"]).drop_duplicates(
             subset=["coord_company_key"],
             keep="first",
         )
@@ -295,6 +459,8 @@ def attach_coordinates(
                     "coord_longitude",
                     "coordinate_source_file",
                     "coordinate_source_sheet",
+                    "coord_address",
+                    "coord_location",
                 ]
             ].rename(
                 columns={
@@ -304,6 +470,8 @@ def attach_coordinates(
                     "coord_longitude": "exact_longitude",
                     "coordinate_source_file": "exact_coordinate_source_file",
                     "coordinate_source_sheet": "exact_coordinate_source_sheet",
+                    "coord_address": "exact_coord_address",
+                    "coord_location": "exact_coord_location",
                 }
             ),
             left_on=["company_key", "location_key"],
@@ -318,6 +486,8 @@ def attach_coordinates(
                     "coord_longitude",
                     "coordinate_source_file",
                     "coordinate_source_sheet",
+                    "coord_address",
+                    "coord_location",
                     *([c for c in ["coord_city", "coord_county"] if c in company_coords.columns]),
                 ]
             ].rename(
@@ -327,6 +497,8 @@ def attach_coordinates(
                     "coord_longitude": "company_longitude",
                     "coordinate_source_file": "company_coordinate_source_file",
                     "coordinate_source_sheet": "company_coordinate_source_sheet",
+                    "coord_address": "company_coord_address",
+                    "coord_location": "company_coord_location",
                     "coord_city": "company_coord_city",
                     "coord_county": "company_coord_county",
                 }
@@ -336,16 +508,31 @@ def attach_coordinates(
             how="left",
         )
 
-    for _, row in out.iterrows():
-        city, county = extract_city_county(row.get("location"))
+    for idx, row in out.iterrows():
+        location_text = normalize_cell(row.get("location"))
+        address_text = normalize_cell(row.get("address"))
+        city, county = extract_city_county(location_text)
         explicit_city = normalize_cell(row.get("company_coord_city"))
         explicit_county = normalize_cell(row.get("company_coord_county"))
+        explicit_location = normalize_cell(row.get("company_coord_location"))
+        explicit_address = normalize_cell(row.get("company_coord_address"))
+        exact_location = normalize_cell(row.get("exact_coord_location"))
+        exact_address = normalize_cell(row.get("exact_coord_address"))
+        if not location_text and explicit_location:
+            location_text = explicit_location
+            city, county = extract_city_county(location_text)
+        if not address_text and explicit_address:
+            address_text = explicit_address
+        if not city:
+            city = extract_city_from_address(address_text)
         if not city and explicit_city:
             city = explicit_city.title()
         if not county and explicit_county:
             county = explicit_county.title()
-        cities.append(city)
-        counties.append(county)
+        if not county and city:
+            mapped_county = CITY_COUNTY_FALLBACK.get(city.strip().lower())
+            if mapped_county:
+                county = mapped_county
 
         lat = _safe_float(row.get("latitude"))
         lon = _safe_float(row.get("longitude"))
@@ -359,9 +546,37 @@ def attach_coordinates(
             if exact_lat is not None and exact_lon is not None:
                 lat, lon = exact_lat, exact_lon
                 source = f"coordinates_excel:{normalize_cell(row.get('exact_coordinate_source_file')) or 'external'}"
+                if exact_location:
+                    location_text = exact_location
+                    parsed_city, parsed_county = extract_city_county(location_text)
+                    city = parsed_city or city
+                    county = parsed_county or county
+                if exact_address and not address_text:
+                    address_text = exact_address
             elif company_lat is not None and company_lon is not None:
                 lat, lon = company_lat, company_lon
                 source = f"coordinates_excel:{normalize_cell(row.get('company_coordinate_source_file')) or 'external'}"
+                if explicit_location:
+                    location_text = explicit_location
+                    parsed_city, parsed_county = extract_city_county(location_text)
+                    city = parsed_city or city
+                    county = parsed_county or county
+                if explicit_address and not address_text:
+                    address_text = explicit_address
+
+        if not county and county_geometries:
+            inferred_county = infer_county_from_point(lat=lat, lon=lon, county_geometries=county_geometries)
+            if inferred_county:
+                county = inferred_county
+        elif county and county_geometries and lat is not None and lon is not None:
+            inferred_county = infer_county_from_point(lat=lat, lon=lon, county_geometries=county_geometries)
+            if inferred_county and inferred_county.strip().lower() != county.strip().lower():
+                county = inferred_county
+            elif not inferred_county:
+                county_key = county.strip().lower()
+                if county_key in county_centroids:
+                    lat, lon = county_centroids[county_key]
+                    source = "county_centroid"
 
         if (lat is None or lon is None) and county:
             county_key = county.strip().lower()
@@ -372,9 +587,13 @@ def attach_coordinates(
         if lat is None or lon is None:
             source = "missing"
 
+        cities.append(city)
+        counties.append(county)
         lats.append(lat)
         lons.append(lon)
         sources.append(source)
+        out.at[idx, "location"] = location_text
+        out.at[idx, "address"] = address_text
 
     out["city"] = cities
     out["county"] = counties
@@ -390,11 +609,15 @@ def attach_coordinates(
         "exact_longitude",
         "exact_coordinate_source_file",
         "exact_coordinate_source_sheet",
+        "exact_coord_address",
+        "exact_coord_location",
         "company_coord_key",
         "company_latitude",
         "company_longitude",
         "company_coordinate_source_file",
         "company_coordinate_source_sheet",
+        "company_coord_address",
+        "company_coord_location",
         "company_coord_city",
         "company_coord_county",
     ]
@@ -407,6 +630,12 @@ def _company_slug(company: str, fallback_idx: int) -> str:
     return slug or f"company-{fallback_idx}"
 
 
+def _facility_slug(company: str, location: str, address: str, fallback_idx: int) -> str:
+    parts = [normalize_match_key(company), normalize_match_key(location), normalize_match_key(address)]
+    slug = re.sub(r"[^a-z0-9]+", "-", " ".join([p for p in parts if p])).strip("-")
+    return slug or f"facility-{fallback_idx}"
+
+
 def build_chunk_records(df: pd.DataFrame) -> List[dict]:
     records: List[dict] = []
     for row_idx, (_, row) in enumerate(df.iterrows()):
@@ -416,6 +645,7 @@ def build_chunk_records(df: pd.DataFrame) -> List[dict]:
         category = normalize_cell(row.get("category"))
         industry_group = normalize_cell(row.get("industry_group"))
         location = normalize_cell(row.get("location"))
+        address = normalize_cell(row.get("address"))
         facility_type = normalize_cell(row.get("primary_facility_type"))
         ev_role = normalize_cell(row.get("ev_supply_chain_role"))
         primary_oems = normalize_cell(row.get("primary_oems"))
@@ -429,12 +659,17 @@ def build_chunk_records(df: pd.DataFrame) -> List[dict]:
         latitude = _safe_float(row.get("latitude"))
         longitude = _safe_float(row.get("longitude"))
         coordinate_source = normalize_cell(row.get("coordinate_source"))
+        source_workbook = normalize_cell(row.get("source_workbook")) or DEFAULT_EXCEL_PATH.name
+        source_sheet = normalize_cell(row.get("source_sheet")) or "Data"
+        facility_slug = _facility_slug(company, location, address, row_idx + 1)
 
         base = {
+            "facility_id": facility_slug,
             "company": company,
             "category": category,
             "industry_group": industry_group,
             "location": location,
+            "address": address,
             "city": city,
             "county": county,
             "ev_supply_chain_role": ev_role,
@@ -449,44 +684,64 @@ def build_chunk_records(df: pd.DataFrame) -> List[dict]:
             "longitude": longitude,
             "coordinate_source": coordinate_source,
             "row_index": int(row_idx),
-            "source_dataset": "GNEM updated excel.xlsx",
+            "source_dataset": source_workbook,
+            "source_sheet": source_sheet,
         }
+
+        geo_line = (
+            f"Facility: {location or city or county or 'Unknown'} | Address: {address or 'Unknown'} | "
+            f"City: {city or 'Unknown'} | County: {county or 'Unknown'} | "
+            f"Latitude: {latitude if latitude is not None else 'unknown'} | "
+            f"Longitude: {longitude if longitude is not None else 'unknown'} | "
+            f"Coordinate Source: {coordinate_source or 'unknown'}"
+        )
+        ops_line = (
+            f"Facility Type: {facility_type or 'Unknown'} | Category: {category or 'Unknown'} | "
+            f"Industry Group: {industry_group or 'Unknown'} | Employment: "
+            f"{int(employment) if employment is not None else 'unknown'}"
+        )
+        chain_line = (
+            f"Supply Chain Role: {ev_role or 'Unknown'} | OEMs: {primary_oems or 'Unknown'} | "
+            f"Affiliation: {affiliation_type or 'Unknown'} | Electrification Relevance: {ev_relevant or 'Unknown'}"
+        )
+        capability_line = (
+            f"Product / Service: {product_service or 'Unknown'} | Classification Method: "
+            f"{classification or 'Unknown'}"
+        )
 
         chunk_templates = {
             "company_profile": (
-                "Company Profile\n"
+                "Company Profile and Facility Context\n"
                 f"Company: {company}\n"
-                f"Category: {category}\n"
-                f"Industry Group: {industry_group}\n"
-                f"Primary Facility Type: {facility_type}\n"
-                f"EV Supply Chain Role: {ev_role}\n"
-                f"Classification Method: {classification}"
+                f"{ops_line}\n"
+                f"{chain_line}"
             ),
             "supply_chain": (
-                "Supply Chain Relationships\n"
+                "Supply Chain Relationships and OEM Exposure\n"
                 f"Company: {company}\n"
-                f"Primary OEMs: {primary_oems}\n"
-                f"Supplier / Affiliation Type: {affiliation_type}\n"
-                f"EV / Battery Relevant: {ev_relevant}\n"
-                f"EV Supply Chain Role: {ev_role}"
+                f"{chain_line}\n"
+                f"{ops_line}"
             ),
             "products_capabilities": (
-                "Products and Capabilities\n"
+                "Products, Capabilities, and Manufacturing Specialization\n"
                 f"Company: {company}\n"
-                f"Product / Service: {product_service}\n"
-                f"Industry Group: {industry_group}\n"
-                f"Category: {category}"
+                f"{capability_line}\n"
+                f"{ops_line}"
             ),
             "geo_operations": (
-                "Geographic Operations\n"
+                "Geospatial Operations and Site Coordinates\n"
                 f"Company: {company}\n"
-                f"Location: {location}\n"
-                f"City: {city}\n"
-                f"County: {county}\n"
-                f"Latitude: {latitude if latitude is not None else 'unknown'}\n"
-                f"Longitude: {longitude if longitude is not None else 'unknown'}\n"
-                f"Coordinate Source: {coordinate_source or 'unknown'}\n"
-                f"Employment: {int(employment) if employment is not None else 'unknown'}"
+                f"{geo_line}\n"
+                f"{ops_line}"
+            ),
+            "resilience_network": (
+                "Supply Chain Resilience, Interruption Response, and Alternative Supplier Search\n"
+                f"Company: {company}\n"
+                f"{chain_line}\n"
+                f"{capability_line}\n"
+                f"{geo_line}\n"
+                "Use this facility record to reason about nearby substitute suppliers, "
+                "county-level coverage gaps, and disruption exposure in the Georgia EV supply chain."
             ),
         }
 
@@ -494,7 +749,7 @@ def build_chunk_records(df: pd.DataFrame) -> List[dict]:
             records.append(
                 {
                     **base,
-                    "chunk_id": f"{company_slug}:{row_idx}:{chunk_type}",
+                    "chunk_id": f"{company_slug}:{facility_slug}:{row_idx}:{chunk_type}",
                     "chunk_type": chunk_type,
                     "chunk_text": chunk_text.strip(),
                 }
@@ -603,24 +858,41 @@ def resolve_input_path(primary: Path, fallback_name: str) -> Path:
     raise FileNotFoundError(f"Missing input file: {primary} (and fallback {fallback})")
 
 
-def run_ingestion(
-    excel_path: Path = DEFAULT_EXCEL_PATH,
-    geojson_path: Path = DEFAULT_GEOJSON_PATH,
-    coordinate_excel_path: Path = DEFAULT_COORDINATE_EXCEL_PATH,
-    db_path: Path = DEFAULT_DB_PATH,
-    faiss_path: Path = DEFAULT_FAISS_PATH,
-    metadata_path: Path = DEFAULT_METADATA_PATH,
-    model_name: str = DEFAULT_MODEL_NAME,
-) -> None:
-    excel_path = resolve_input_path(excel_path, "GNEM updated excel.xlsx")
-    geojson_path = resolve_input_path(geojson_path, "Counties_Georgia.geojson")
-    coordinate_workbook = discover_coordinate_workbook(explicit_path=coordinate_excel_path)
-    coordinate_df, coordinate_label = load_coordinate_enrichment(coordinate_workbook)
-
-    xls = pd.ExcelFile(excel_path)
+def _load_company_sheet(workbook_path: Path) -> Tuple[pd.DataFrame, str]:
+    xls = pd.ExcelFile(workbook_path)
     sheet_name = "Data" if "Data" in xls.sheet_names else xls.sheet_names[0]
-    df = pd.read_excel(excel_path, sheet_name=sheet_name)
-    df = clean_columns(df)
+    df = clean_columns(pd.read_excel(workbook_path, sheet_name=sheet_name))
+    df["source_workbook"] = workbook_path.name
+    df["source_sheet"] = sheet_name
+    df["company_key"] = df.get("company", "").apply(normalize_match_key)
+    df["location_key"] = df.get("location", "").apply(normalize_match_key)
+    if "address" not in df.columns:
+        df["address"] = ""
+    df["address_key"] = df.get("address", "").apply(normalize_match_key)
+    return df, sheet_name
+
+
+def _append_legacy_only_rows(df: pd.DataFrame, legacy_path: Path = LEGACY_EXCEL_PATH) -> pd.DataFrame:
+    if not legacy_path.exists():
+        return df
+
+    legacy_df, _ = _load_company_sheet(legacy_path)
+    existing_company_keys = set(df["company_key"].dropna().astype(str).tolist())
+    legacy_only = legacy_df[~legacy_df["company_key"].isin(existing_company_keys)].copy()
+    if legacy_only.empty:
+        return df
+    merged = pd.concat([df, legacy_only], ignore_index=True, sort=False)
+    return merged
+
+
+def prepare_company_dataframe(
+    excel_path: Path,
+    geojson_path: Path,
+    coordinate_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    df, _ = _load_company_sheet(excel_path)
+    if excel_path.resolve() != LEGACY_EXCEL_PATH.resolve():
+        df = _append_legacy_only_rows(df, legacy_path=LEGACY_EXCEL_PATH)
 
     if "employment" in df.columns:
         df["employment"] = (
@@ -632,7 +904,47 @@ def run_ingestion(
         df["employment"] = pd.to_numeric(df["employment"], errors="coerce")
 
     county_centroids = load_county_centroids(geojson_path)
-    df = attach_coordinates(df, county_centroids, coordinate_df=coordinate_df)
+    county_geometries = load_county_geometries(geojson_path)
+    has_source_coordinates = (
+        "latitude" in df.columns
+        and "longitude" in df.columns
+        and pd.to_numeric(df["latitude"], errors="coerce").notna().sum() > 0
+        and pd.to_numeric(df["longitude"], errors="coerce").notna().sum() > 0
+    )
+    enrichment_df = None if has_source_coordinates else coordinate_df
+
+    df = attach_coordinates(
+        df,
+        county_centroids=county_centroids,
+        coordinate_df=enrichment_df,
+        county_geometries=county_geometries,
+    )
+
+    df = df.drop(columns=[c for c in ["company_key", "location_key", "address_key"] if c in df.columns])
+    return df.drop_duplicates(keep="first").reset_index(drop=True)
+
+
+def run_ingestion(
+    excel_path: Path = DEFAULT_EXCEL_PATH,
+    geojson_path: Path = DEFAULT_GEOJSON_PATH,
+    coordinate_excel_path: Path = DEFAULT_COORDINATE_EXCEL_PATH,
+    db_path: Path = DEFAULT_DB_PATH,
+    faiss_path: Path = DEFAULT_FAISS_PATH,
+    metadata_path: Path = DEFAULT_METADATA_PATH,
+    model_name: str = DEFAULT_MODEL_NAME,
+) -> None:
+    if not excel_path.exists() and LEGACY_EXCEL_PATH.exists():
+        excel_path = LEGACY_EXCEL_PATH
+    else:
+        excel_path = resolve_input_path(excel_path, "GNEM updated excel.xlsx")
+    geojson_path = resolve_input_path(geojson_path, "Counties_Georgia.geojson")
+    coordinate_workbook = discover_coordinate_workbook(explicit_path=coordinate_excel_path)
+    coordinate_df, coordinate_label = load_coordinate_enrichment(coordinate_workbook)
+    df = prepare_company_dataframe(
+        excel_path=excel_path,
+        geojson_path=geojson_path,
+        coordinate_df=coordinate_df,
+    )
 
     chunk_records = build_chunk_records(df)
     docs = [record["chunk_text"] for record in chunk_records]
@@ -659,7 +971,12 @@ def run_ingestion(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ingest GNEM Excel data into DuckDB + FAISS.")
-    parser.add_argument("--excel", type=Path, default=DEFAULT_EXCEL_PATH, help="Path to GNEM Excel file.")
+    parser.add_argument(
+        "--excel",
+        type=Path,
+        default=DEFAULT_EXCEL_PATH,
+        help="Path to the GNEM workbook. Defaults to the updated workbook with lat/lon columns.",
+    )
     parser.add_argument("--geojson", type=Path, default=DEFAULT_GEOJSON_PATH, help="Path to Georgia counties GeoJSON.")
     parser.add_argument(
         "--coordinates",

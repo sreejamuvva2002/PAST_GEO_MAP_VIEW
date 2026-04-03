@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import re
 import socket
@@ -48,7 +49,6 @@ SOURCE_LABELS = {
     "missing": "Missing",
     "unknown": "Unknown",
 }
-
 
 @st.cache_data(show_spinner=False)
 def load_county_geojson() -> dict | None:
@@ -216,11 +216,13 @@ def inject_styles() -> None:
         }}
 
         .hero-shell {{
-            background: linear-gradient(135deg, #ffffff 0%, #f6fafb 58%, #eef7f7 100%);
+            background:
+                radial-gradient(circle at top right, rgba(18, 137, 127, 0.08), transparent 32%),
+                linear-gradient(135deg, #ffffff 0%, #f7fafc 60%, #eef7f7 100%);
             border: 1px solid {PALETTE["border"]};
-            border-radius: 26px;
-            padding: 1.55rem 1.7rem 1.45rem;
-            box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
+            border-radius: 28px;
+            padding: 1.4rem 1.6rem 1.35rem;
+            box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
         }}
 
         .hero-topline {{
@@ -240,16 +242,16 @@ def inject_styles() -> None:
         }}
 
         .hero-title {{
-            font-size: clamp(2rem, 3.4vw, 3rem);
-            line-height: 0.98;
+            font-size: clamp(2rem, 3vw, 2.8rem);
+            line-height: 1.02;
             font-weight: 800;
             color: {PALETTE["ink"]};
-            margin-bottom: 0.7rem;
+            margin-bottom: 0.65rem;
             letter-spacing: -0.04em;
         }}
 
         .hero-subtitle {{
-            font-size: 0.98rem;
+            font-size: 0.96rem;
             line-height: 1.55;
             color: {PALETTE["muted"]};
             max-width: 920px;
@@ -318,29 +320,30 @@ def inject_styles() -> None:
         }}
 
         div[data-testid="stTextInput"] input {{
-            background: #f8fafc;
-            border: 1px solid {PALETTE["border"]};
-            border-radius: 16px;
+            background: #ffffff;
+            border: 1px solid #c9d7e5;
+            border-radius: 18px;
             color: {PALETTE["ink"]};
-            padding: 0.95rem 1rem;
-            font-size: 0.98rem;
+            padding: 1rem 1.05rem;
+            font-size: 0.96rem;
+            box-shadow: 0 10px 22px rgba(15, 23, 42, 0.05);
         }}
 
-        .stButton > button {{
+        button[data-testid="stBaseButton-primary"] {{
             width: 100%;
             border: 0;
-            border-radius: 16px;
-            background: linear-gradient(135deg, {PALETTE["teal"]} 0%, #0f766e 100%);
+            border-radius: 18px;
+            background: linear-gradient(135deg, #12897f 0%, #0f766e 45%, #0b5f59 100%);
             color: #ffffff;
             font-size: 0.82rem;
             font-weight: 800;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            padding: 0.92rem 1.15rem;
-            box-shadow: 0 12px 24px rgba(15, 118, 110, 0.20);
+            padding: 0.98rem 1.15rem;
+            box-shadow: 0 14px 28px rgba(15, 118, 110, 0.22);
         }}
 
-        .stButton > button:hover {{
+        button[data-testid="stBaseButton-primary"]:hover {{
             background: linear-gradient(135deg, #0f766e 0%, #0b5f59 100%);
             color: #ffffff;
         }}
@@ -475,6 +478,63 @@ def inject_styles() -> None:
             height: 0.7rem;
             border-radius: 999px;
         }}
+
+        .query-shell {{
+            background: rgba(255, 255, 255, 0.86);
+            border: 1px solid {PALETTE["border"]};
+            border-radius: 24px;
+            padding: 1rem 1rem 0.3rem;
+            box-shadow: 0 16px 32px rgba(15, 23, 42, 0.07);
+            margin-bottom: 0.5rem;
+        }}
+
+        .context-card {{
+            background: linear-gradient(180deg, #f8fbfc 0%, #f5f8fb 100%);
+            border: 1px solid {PALETTE["border"]};
+            border-radius: 18px;
+            padding: 0.85rem 1rem;
+            margin-bottom: 0.7rem;
+        }}
+
+        .context-label {{
+            font-size: 0.68rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: {PALETTE["muted"]};
+            margin-bottom: 0.3rem;
+        }}
+
+        .context-value {{
+            font-size: 0.94rem;
+            font-weight: 800;
+            color: {PALETTE["ink"]};
+            letter-spacing: -0.03em;
+        }}
+
+        .context-note {{
+            margin-top: 0.35rem;
+            font-size: 0.74rem;
+            line-height: 1.45;
+            color: {PALETTE["muted"]};
+        }}
+
+        .answer-body h3 {{
+            margin: 0.9rem 0 0.35rem;
+            font-size: 0.95rem;
+            font-weight: 800;
+            color: {PALETTE["teal"]};
+            letter-spacing: -0.03em;
+        }}
+
+        .answer-body ul {{
+            margin-top: 0.45rem;
+            padding-left: 1.1rem;
+        }}
+
+        .answer-body li {{
+            margin-bottom: 0.3rem;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -515,6 +575,10 @@ def reformat_answer_breaks(safe_text: str) -> str:
         return f"<span class='citation-chip'>{citation}</span>"
 
     text = safe_text.replace("\n", "<br>")
+    for heading in ["Direct Answer", "Spatial / Supply-Chain Details", "Evidence Gaps"]:
+        text = text.replace(f"{heading}<br>", f"<h3>{heading}</h3>")
+        if text.endswith(heading):
+            text = text[: -len(heading)] + f"<h3>{heading}</h3>"
     return re.sub(r"\[C\d+\]", _replace_citation, text)
 
 
@@ -538,8 +602,8 @@ def render_header(backend_ok: bool) -> None:
                     <div class="hero-kicker">Hybrid GeoJSON + Geospatial RAG Platform</div>
                     <div class="hero-title">Georgia EV Supply Chain Intelligence Dashboard</div>
                     <div class="hero-subtitle">
-                        Structured SQL retrieval, FAISS semantic search, GeoJSON county mapping,
-                        and local evidence-grounded LLM synthesis in one research-ready interface.
+                        County-aware GeoJSON mapping, radius and disruption analysis, hybrid SQL + FAISS retrieval,
+                        and citation-grounded LLM synthesis for Georgia EV supply-chain intelligence.
                     </div>
                 </div>
                 <div class="status-pill {status_class}">{status_label}</div>
@@ -551,33 +615,46 @@ def render_header(backend_ok: bool) -> None:
 
 
 def render_query_panel() -> tuple[bool, str]:
-    section_heading(
-        "Query",
-        "Research Question",
-        "Submit one geospatial supply-chain question and inspect grounded evidence, ranked companies, and county-aware map output.",
-    )
-    with st.form("research_query_form", clear_on_submit=False, border=False):
-        input_col, button_col = st.columns([0.82, 0.18], vertical_alignment="bottom")
-        with input_col:
-            question = st.text_input(
-                "Research question",
-                key="research_query_text",
-                placeholder="",
-                label_visibility="collapsed",
-            )
-        with button_col:
-            submitted = st.form_submit_button("Run Query", use_container_width=True)
+    with st.container():
+        st.markdown("<div class='query-shell'>", unsafe_allow_html=True)
+        section_heading(
+            "Query",
+            "Ask a Geospatial Supply-Chain Question",
+            "Search by county, radius, supplier capability, disruption scenario, or network gaps across Georgia.",
+        )
+        with st.form("research_query_form", clear_on_submit=False, border=False):
+            input_col, button_col = st.columns([0.84, 0.16], vertical_alignment="bottom")
+            with input_col:
+                question = st.text_input(
+                    "Research question",
+                    key="research_query_text",
+                    placeholder="Example: Show battery suppliers within 20 miles of 33.7490, -84.3880.",
+                    label_visibility="collapsed",
+                )
+            with button_col:
+                submitted = st.form_submit_button("Run GeoRAG", use_container_width=True, type="primary")
+        st.markdown("</div>", unsafe_allow_html=True)
     return submitted, question.strip()
 
 
 def render_result_metrics(result: Dict) -> None:
     plan = result.get("plan", {}) if isinstance(result.get("plan", {}), dict) else {}
+    map_context = result.get("map_context", {}) if isinstance(result.get("map_context", {}), dict) else {}
     chunks = result.get("retrieved_chunks", []) or []
     companies = result.get("retrieved_companies", []) or []
+    gap_report = map_context.get("gap_report", {}) if isinstance(map_context.get("gap_report", {}), dict) else {}
+    radius_km = map_context.get("radius_km")
+    if radius_km is None:
+        radius_label = "County / semantic"
+    else:
+        radius_label = f"{float(radius_km):.1f} km / {float(radius_km) * 0.621371:.1f} mi"
     metric_values = [
         ("Query Plan", str(plan.get("classification", "N/A")).replace("_", " ")),
         ("Evidence Chunks", f"{len(chunks)}"),
         ("Mapped Companies", f"{len(companies)}"),
+        ("County Coverage", f"{int(map_context.get('county_coverage_count') or 0)}"),
+        ("Gap Counties", f"{int(gap_report.get('gap_county_count') or 0)}"),
+        ("Search Radius", radius_label),
         ("LLM Model", str(result.get("model_used", "unknown"))),
     ]
     metric_html = "".join(
@@ -590,6 +667,49 @@ def render_result_metrics(result: Dict) -> None:
         for label, value in metric_values
     )
     st.markdown(f"<div class='metrics-row'>{metric_html}</div>", unsafe_allow_html=True)
+
+
+def render_map_context_summary(result: Dict) -> None:
+    map_context = result.get("map_context", {}) if isinstance(result.get("map_context", {}), dict) else {}
+    if not map_context:
+        return
+
+    gap_report = map_context.get("gap_report", {}) if isinstance(map_context.get("gap_report", {}), dict) else {}
+    focus_label = map_context.get("focus_label") or "Dataset scope"
+    map_mode = str(map_context.get("map_mode") or "standard").replace("_", " ").title()
+    center_lat = map_context.get("center_lat")
+    center_lon = map_context.get("center_lon")
+    counties = ", ".join(map_context.get("counties", []) or []) or "All Georgia counties"
+    if center_lat is not None and center_lon is not None:
+        center_note = f"Search hub at {float(center_lat):.4f}, {float(center_lon):.4f}"
+    else:
+        center_note = "No explicit search hub; map displays retrieved facility coordinates and county coverage."
+    if map_context.get("radius_km") is not None:
+        radius_note = f"Radius {float(map_context['radius_km']):.1f} km / {float(map_context['radius_km']) * 0.621371:.1f} mi"
+    else:
+        radius_note = "County and semantic retrieval mode"
+
+    cards = [
+        ("Map Mode", map_mode, radius_note),
+        ("Focus", str(focus_label), center_note),
+        ("County Scope", counties, f"Covered counties in result: {int(map_context.get('county_coverage_count') or 0)}"),
+        (
+            "Gap Scan",
+            f"{int(gap_report.get('gap_county_count') or 0)} counties",
+            "Highest-distance uncovered counties are highlighted in red when gap analysis is active.",
+        ),
+    ]
+    card_html = "".join(
+        f"""
+        <div class="context-card">
+            <div class="context-label">{html.escape(label)}</div>
+            <div class="context-value">{html.escape(value)}</div>
+            <div class="context-note">{html.escape(note)}</div>
+        </div>
+        """
+        for label, value, note in cards
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
 
 
 def render_answer_panel(question: str, answer: str) -> None:
@@ -616,7 +736,7 @@ def render_chunks(chunks: List[Dict]) -> None:
             st.info("No supporting chunks were returned for this query.")
             return
 
-        for chunk in chunks[:5]:
+        for chunk in chunks[:8]:
             chunk_id = html.escape(str(chunk.get("chunk_id") or "C?"))
             engine = html.escape(str(chunk.get("engine") or "unknown"))
             chunk_type = html.escape(str(chunk.get("chunk_type") or "retrieved_chunk").replace("_", " "))
@@ -660,6 +780,12 @@ def render_table(records: List[Dict]) -> None:
         df = pd.DataFrame(records).copy()
         if "distance_km" in df.columns:
             df["distance_km"] = pd.to_numeric(df["distance_km"], errors="coerce").round(2)
+        if "distance_miles" in df.columns:
+            df["distance_miles"] = pd.to_numeric(df["distance_miles"], errors="coerce").round(2)
+        if "nearest_peer_distance_km" in df.columns:
+            df["nearest_peer_distance_km"] = pd.to_numeric(df["nearest_peer_distance_km"], errors="coerce").round(2)
+        if "nearest_peer_distance_miles" in df.columns:
+            df["nearest_peer_distance_miles"] = pd.to_numeric(df["nearest_peer_distance_miles"], errors="coerce").round(2)
         if "map_weight" in df.columns:
             df["map_weight"] = pd.to_numeric(df["map_weight"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
         if "employment" in df.columns:
@@ -677,26 +803,44 @@ def render_table(records: List[Dict]) -> None:
 
         rename_map = {
             "company": "Company",
+            "category": "Category",
             "industry_group": "Industry",
             "city": "City",
             "county": "County",
+            "address": "Address",
             "primary_oems": "Primary OEMs",
             "ev_supply_chain_role": "EV Role",
+            "product_service": "Product / Service",
+            "ev_battery_relevant": "EV / Battery",
             "employment": "Employment",
             "distance_km": "Distance (km)",
+            "distance_miles": "Distance (mi)",
+            "nearest_peer_company": "Nearest Peer",
+            "nearest_peer_distance_km": "Nearest Peer (km)",
+            "nearest_peer_distance_miles": "Nearest Peer (mi)",
+            "match_reason": "Match Reason",
             "coordinate_source": "Coordinate Source",
             "map_weight": "Map Weight",
             "score": "Score",
         }
         preferred_cols = [
             "company",
+            "category",
             "industry_group",
             "ev_supply_chain_role",
+            "product_service",
             "city",
             "county",
+            "address",
             "primary_oems",
             "distance_km",
+            "distance_miles",
+            "nearest_peer_company",
+            "nearest_peer_distance_km",
+            "nearest_peer_distance_miles",
             "map_weight",
+            "match_reason",
+            "ev_battery_relevant",
             "employment",
             "coordinate_source",
         ]
@@ -707,21 +851,136 @@ def render_table(records: List[Dict]) -> None:
             display_df,
             use_container_width=True,
             hide_index=True,
-            height=390,
+            height=430,
             column_config={
                 "Map Weight": st.column_config.ProgressColumn("Map Weight", min_value=0.0, max_value=1.0, format="%.2f"),
                 "Distance (km)": st.column_config.NumberColumn("Distance (km)", format="%.2f"),
+                "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.2f"),
+                "Nearest Peer (km)": st.column_config.NumberColumn("Nearest Peer (km)", format="%.2f"),
+                "Nearest Peer (mi)": st.column_config.NumberColumn("Nearest Peer (mi)", format="%.2f"),
                 "Employment": st.column_config.NumberColumn("Employment", format="%d"),
             },
         )
 
 
-def render_map(records: List[Dict]) -> None:
+def build_radius_circle_geojson(center_lat: float, center_lon: float, radius_km: float, steps: int = 96) -> dict:
+    earth_radius_km = 6371.0088
+    lat_rad = math.radians(center_lat)
+    lon_rad = math.radians(center_lon)
+    angular_distance = float(radius_km) / earth_radius_km
+    coords = []
+    for step in range(steps + 1):
+        bearing = 2.0 * math.pi * step / steps
+        point_lat = math.asin(
+            math.sin(lat_rad) * math.cos(angular_distance)
+            + math.cos(lat_rad) * math.sin(angular_distance) * math.cos(bearing)
+        )
+        point_lon = lon_rad + math.atan2(
+            math.sin(bearing) * math.sin(angular_distance) * math.cos(lat_rad),
+            math.cos(angular_distance) - math.sin(lat_rad) * math.sin(point_lat),
+        )
+        coords.append([math.degrees(point_lon), math.degrees(point_lat)])
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"fill_color": [18, 137, 127, 26]},
+                "geometry": {"type": "Polygon", "coordinates": [coords]},
+            }
+        ],
+    }
+
+
+def build_county_overlay_geojson(
+    df: pd.DataFrame,
+    map_context: Dict,
+) -> dict | None:
+    county_geojson = load_county_geojson()
+    if not county_geojson:
+        return None
+
+    counts = {}
+    if "county" in df.columns:
+        counts = (
+            df["county"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().value_counts().to_dict()
+        )
+
+    gap_report = map_context.get("gap_report", {}) if isinstance(map_context.get("gap_report", {}), dict) else {}
+    gap_names = {
+        str(item.get("county") or "").strip().lower()
+        for item in gap_report.get("gap_counties", []) or []
+        if str(item.get("county") or "").strip()
+    }
+    selected = {
+        str(county or "").strip().lower().replace(" county", "")
+        for county in map_context.get("counties", []) or []
+        if str(county or "").strip()
+    }
+
+    max_count = max(counts.values()) if counts else 1
+    overlay = json.loads(json.dumps(county_geojson))
+    for feature in overlay.get("features", []):
+        props = feature.setdefault("properties", {})
+        county_name = str(props.get("NAME10") or "").strip()
+        county_key = county_name.lower()
+        count = int(counts.get(county_name, 0))
+        intensity = min(180, 35 + int(180 * count / max_count)) if count else 18
+
+        if county_key in gap_names:
+            fill = [185, 75, 92, 120]
+        elif county_key in selected:
+            fill = [18, 137, 127, 95]
+        elif count:
+            fill = [56, 111, 164, intensity]
+        else:
+            fill = [110, 126, 142, 10]
+
+        props["fill_color"] = fill
+        props["line_color"] = [17, 38, 58, 130]
+        props["facility_count"] = count
+    return overlay
+
+
+def build_center_and_arc_frames(df: pd.DataFrame, map_context: Dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    center_lat = map_context.get("center_lat")
+    center_lon = map_context.get("center_lon")
+    if center_lat is None or center_lon is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    center_df = pd.DataFrame(
+        [
+            {
+                "latitude": float(center_lat),
+                "longitude": float(center_lon),
+                "label": str(map_context.get("focus_label") or "Search center"),
+                "radius": 7000,
+                "tooltip_company": str(map_context.get("focus_label") or "Search center"),
+                "tooltip_role": "Search center",
+                "tooltip_product": "Query focus",
+                "tooltip_location": str(map_context.get("focus_label") or "Search center"),
+                "tooltip_coord_source": "Query center",
+                "tooltip_weight": "1.00",
+                "tooltip_distance": "0.00 km / 0.00 mi",
+                "tooltip_nearest_peer": "N/A",
+                "tooltip_nearest_peer_distance": "N/A",
+            }
+        ]
+    )
+    arc_df = df.copy()
+    arc_df["source_latitude"] = float(center_lat)
+    arc_df["source_longitude"] = float(center_lon)
+    arc_df["arc_width"] = arc_df["map_weight"].apply(lambda v: 1 + int(float(v) * 4))
+    return center_df, arc_df.head(60)
+
+
+def render_map(records: List[Dict], map_context: Dict | None = None) -> None:
     with st.container(border=True):
+        map_context = map_context or {}
         section_heading(
             "Geospatial Map",
-            "GeoJSON County Map + Supplier Heat Layer",
-            "County boundaries, weighted company markers, and coordinate-source legend for screenshot-ready spatial interpretation.",
+            "County Coverage + Radius / Disruption Map",
+            "County choropleth fill, weighted company markers, optional hub-to-supplier arcs, and coordinate-source legend.",
         )
 
         if not records:
@@ -752,6 +1011,7 @@ def render_map(records: List[Dict]) -> None:
             df["coordinate_source"] = "unknown"
         df["tooltip_company"] = df.get("company", pd.Series(index=df.index)).fillna("Unknown company")
         df["tooltip_role"] = df.get("ev_supply_chain_role", pd.Series(index=df.index)).fillna("Unknown role")
+        df["tooltip_product"] = df.get("product_service", pd.Series(index=df.index)).fillna("Unknown product/service")
         df["tooltip_location"] = (
             df.get("city", pd.Series(index=df.index)).fillna("")
             + ", "
@@ -759,6 +1019,19 @@ def render_map(records: List[Dict]) -> None:
         ).str.strip(", ")
         df["tooltip_coord_source"] = df.get("coordinate_source", pd.Series(index=df.index)).apply(normalize_coordinate_source)
         df["tooltip_weight"] = pd.to_numeric(df["map_weight"], errors="coerce").fillna(0.0).map(lambda v: f"{float(v):.2f}")
+        df["tooltip_nearest_peer"] = df.get("nearest_peer_company", pd.Series(index=df.index)).fillna("N/A")
+        if "nearest_peer_distance_km" in df.columns:
+            df["tooltip_nearest_peer_distance"] = pd.to_numeric(df["nearest_peer_distance_km"], errors="coerce").map(
+                lambda v: f"{float(v):.2f} km / {float(v) * 0.621371:.2f} mi" if pd.notna(v) else "N/A"
+            )
+        else:
+            df["tooltip_nearest_peer_distance"] = "N/A"
+        if "distance_km" in df.columns:
+            df["tooltip_distance"] = pd.to_numeric(df["distance_km"], errors="coerce").map(
+                lambda v: f"{float(v):.2f} km / {float(v) * 0.621371:.2f} mi" if pd.notna(v) else "N/A"
+            )
+        else:
+            df["tooltip_distance"] = "N/A"
 
         color_lookup = {
             "coordinates_excel": [18, 137, 127, 220],
@@ -787,9 +1060,9 @@ def render_map(records: List[Dict]) -> None:
         st.markdown(legend_html, unsafe_allow_html=True)
 
         view_state = pdk.ViewState(
-            latitude=float(df["latitude"].mean()),
-            longitude=float(df["longitude"].mean()),
-            zoom=6.4 if len(df) > 8 else 7.6,
+            latitude=float(map_context.get("center_lat") or df["latitude"].mean()),
+            longitude=float(map_context.get("center_lon") or df["longitude"].mean()),
+            zoom=7.0 if map_context.get("map_mode") == "radius_search" else (6.5 if len(df) > 8 else 7.6),
             pitch=0,
         )
 
@@ -817,16 +1090,69 @@ def render_map(records: List[Dict]) -> None:
             get_radius="radius",
         )
 
-        county_geojson = load_county_geojson()
+        overlay_geojson = build_county_overlay_geojson(df, map_context)
         county_layer = None
-        if county_geojson:
+        if overlay_geojson:
             county_layer = pdk.Layer(
                 "GeoJsonLayer",
-                data=county_geojson,
+                data=overlay_geojson,
                 stroked=True,
-                filled=False,
-                get_line_color=[17, 38, 58, 150],
+                filled=True,
+                get_fill_color="properties.fill_color",
+                get_line_color="properties.line_color",
                 line_width_min_pixels=2,
+                pickable=False,
+            )
+
+        center_df, arc_df = build_center_and_arc_frames(df, map_context)
+        center_layer = None
+        arc_layer = None
+        if not center_df.empty:
+            center_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=center_df,
+                get_position="[longitude, latitude]",
+                get_fill_color=[15, 23, 42, 235],
+                get_line_color=[255, 255, 255, 220],
+                stroked=True,
+                filled=True,
+                line_width_min_pixels=2,
+                radius_min_pixels=7,
+                get_radius="radius",
+                pickable=True,
+            )
+        if not arc_df.empty:
+            arc_layer = pdk.Layer(
+                "ArcLayer",
+                data=arc_df,
+                get_source_position="[source_longitude, source_latitude]",
+                get_target_position="[longitude, latitude]",
+                get_source_color=[18, 137, 127, 155],
+                get_target_color="fill_color",
+                get_width="arc_width",
+                pickable=False,
+            )
+
+        radius_layer = None
+        if (
+            map_context.get("center_lat") is not None
+            and map_context.get("center_lon") is not None
+            and map_context.get("radius_km") is not None
+            and map_context.get("map_mode") == "radius_search"
+        ):
+            radius_layer = pdk.Layer(
+                "GeoJsonLayer",
+                data=build_radius_circle_geojson(
+                    float(map_context["center_lat"]),
+                    float(map_context["center_lon"]),
+                    float(map_context["radius_km"]),
+                ),
+                stroked=True,
+                filled=True,
+                get_fill_color="properties.fill_color",
+                get_line_color=[18, 137, 127, 180],
+                line_width_min_pixels=2,
+                pickable=False,
             )
 
         tooltip = {
@@ -835,7 +1161,10 @@ def render_map(records: List[Dict]) -> None:
                 "<div style='font-size:14px; font-weight:800; margin-bottom:8px;'>{tooltip_company}</div>"
                 "<div style='font-size:12px; line-height:1.6; color:#e5eef3;'>"
                 "<b>Role:</b> {tooltip_role}<br/>"
+                "<b>Product:</b> {tooltip_product}<br/>"
                 "<b>Location:</b> {tooltip_location}<br/>"
+                "<b>Distance:</b> {tooltip_distance}<br/>"
+                "<b>Nearest Peer:</b> {tooltip_nearest_peer} ({tooltip_nearest_peer_distance})<br/>"
                 "<b>Coordinate:</b> {tooltip_coord_source}<br/>"
                 "<b>Map weight:</b> {tooltip_weight}"
                 "</div></div>"
@@ -854,7 +1183,18 @@ def render_map(records: List[Dict]) -> None:
                 map_style="light_no_labels",
                 initial_view_state=view_state,
                 tooltip=tooltip,
-                layers=[layer for layer in [county_layer, heatmap_layer, scatter_layer] if layer is not None],
+                layers=[
+                    layer
+                    for layer in [
+                        county_layer,
+                        radius_layer,
+                        arc_layer,
+                        heatmap_layer,
+                        scatter_layer,
+                        center_layer,
+                    ]
+                    if layer is not None
+                ],
             ),
             use_container_width=True,
         )
@@ -919,6 +1259,7 @@ if result:
         render_chunks(result.get("retrieved_chunks", []) or [])
 
     with output_col:
-        render_map(result.get("retrieved_companies", []) or [])
+        render_map_context_summary(result)
+        render_map(result.get("retrieved_companies", []) or [], result.get("map_context", {}) or {})
         st.write("")
         render_table(result.get("retrieved_companies", []) or [])

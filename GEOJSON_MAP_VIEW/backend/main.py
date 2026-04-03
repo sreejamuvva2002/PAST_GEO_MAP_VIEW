@@ -23,6 +23,7 @@ class ChatResponse(BaseModel):
     retrieved_chunks: List[Dict[str, Any]]
     retrieved_companies: List[Dict[str, Any]]
     plan: Dict[str, Any]
+    map_context: Dict[str, Any]
     model_used: str
 
 

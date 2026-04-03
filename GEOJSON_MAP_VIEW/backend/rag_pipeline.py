@@ -62,7 +62,10 @@ class HybridGeospatialRAGPipeline:
         self.sql_engine = SQLEngine(db_path=db_path)
         self.spatial_engine = SpatialEngine(db_path=db_path, geojson_path=geojson_path)
         self.vector_engine = VectorEngine(faiss_path=faiss_path, metadata_path=metadata_path)
-        self.query_planner = QueryPlanner()
+        self.query_planner = QueryPlanner(
+            company_names=self.sql_engine.list_company_names(),
+            county_names=self.spatial_engine.county_names,
+        )
 
         self.llm_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
         self.llm_client = OpenAI(
@@ -72,13 +75,9 @@ class HybridGeospatialRAGPipeline:
             max_retries=0,
         )
         self.available_models = self._list_available_models()
-        self.llm_model = os.getenv("OLLAMA_MODEL") or self._choose_default_model()
-        if not self.llm_model:
-            raise RuntimeError(
-                "No Ollama model available. Pull one first (for example: ollama pull qwen3:14b) "
-                "or set OLLAMA_MODEL explicitly."
-            )
+        self.llm_model = os.getenv("OLLAMA_MODEL") or self._choose_default_model() or "retrieval-fallback"
         self.fallback_model_preferences = [
+            "gemma3:27b",
             "qwen2.5:14b",
             "qwen2.5:7b",
             "llama3.1:8b",
@@ -96,20 +95,23 @@ class HybridGeospatialRAGPipeline:
     def answer_question(self, question: str) -> dict:
         plan = self.query_planner.plan(question)
         hints = plan.get("hints", {})
+        analysis_intent = str(hints.get("analysis_intent") or "standard_retrieval")
 
         sql_df = pd.DataFrame()
         vector_df = pd.DataFrame()
         geo_df = pd.DataFrame()
+        gap_report: Dict[str, object] = {}
+        map_context: Dict[str, object] = self._build_initial_map_context(plan)
 
         if plan.get("sql"):
             sql_df = self._run_sql_retrieval(question, hints)
 
         if plan.get("vector"):
-            top_k = 14 if plan.get("geo") else 8
+            top_k = 24 if analysis_intent in {"gap_analysis", "disruption_alternatives"} else (16 if plan.get("geo") else 10)
             vector_df = self.vector_engine.semantic_company_search(question, top_k=top_k, per_company_limit=6)
             vector_df = self._optional_keyword_filter(vector_df, question)
             vector_df = self._apply_structured_filters(vector_df, hints)
-            if hints.get("oem"):
+            if hints.get("oem") and analysis_intent != "disruption_alternatives":
                 vector_df = self._filter_by_oem(vector_df, str(hints["oem"]))
 
         if plan.get("geo"):
@@ -119,18 +121,67 @@ class HybridGeospatialRAGPipeline:
 
             coords = hints.get("coordinates")
             city = hints.get("city")
-            if isinstance(coords, dict) and "lat" in coords and "lon" in coords:
+            counties = hints.get("counties") if isinstance(hints.get("counties"), list) else []
+            company_name = str(hints.get("company_name") or "").strip()
+
+            if analysis_intent == "disruption_alternatives" and company_name:
+                geo_df = self.spatial_engine.rank_alternative_suppliers(
+                    company_name=company_name,
+                    radius_km=radius_km,
+                    category_term=str(hints["category_term"]) if hints.get("category_term") else None,
+                    capability_term=str(hints["capability_term"]) if hints.get("capability_term") else None,
+                    max_results=25,
+                )
+                center_lat = geo_df["query_center_lat"].dropna().iloc[0] if not geo_df.empty and "query_center_lat" in geo_df.columns and geo_df["query_center_lat"].notna().any() else None
+                center_lon = geo_df["query_center_lon"].dropna().iloc[0] if not geo_df.empty and "query_center_lon" in geo_df.columns and geo_df["query_center_lon"].notna().any() else None
+                map_context.update(
+                    {
+                        "map_mode": "disruption_alternatives",
+                        "focus_label": company_name,
+                        "center_lat": float(center_lat) if center_lat is not None else None,
+                        "center_lon": float(center_lon) if center_lon is not None else None,
+                        "radius_km": radius_km,
+                    }
+                )
+            elif counties and not city and not coords:
+                geo_df = self.spatial_engine.companies_in_counties(
+                    counties=counties,
+                    candidates=candidate_input,
+                )
+                if geo_df.empty and candidate_input is not None:
+                    geo_df = self.spatial_engine.companies_in_counties(counties=counties, candidates=None)
+                map_context.update({"map_mode": "county_filter", "counties": counties})
+            elif isinstance(coords, dict) and "lat" in coords and "lon" in coords:
                 geo_df = self.spatial_engine.companies_within_radius(
                     lat=float(coords["lat"]),
                     lon=float(coords["lon"]),
                     radius_km=radius_km,
                     candidates=candidate_input,
                 )
+                map_context.update(
+                    {
+                        "map_mode": "radius_search",
+                        "center_lat": float(coords["lat"]),
+                        "center_lon": float(coords["lon"]),
+                        "radius_km": radius_km,
+                        "focus_label": f"{coords['lat']}, {coords['lon']}",
+                    }
+                )
             elif city:
                 geo_df = self.spatial_engine.companies_near_city(
                     city_name=str(city),
                     radius_km=radius_km,
                     candidates=candidate_input,
+                )
+                resolved = self.spatial_engine.resolve_place_coordinates(str(city))
+                map_context.update(
+                    {
+                        "map_mode": "radius_search",
+                        "focus_label": str(city),
+                        "center_lat": float(resolved[0]) if resolved else None,
+                        "center_lon": float(resolved[1]) if resolved else None,
+                        "radius_km": radius_km,
+                    }
                 )
 
             if geo_df.empty and candidate_input is not None:
@@ -150,13 +201,25 @@ class HybridGeospatialRAGPipeline:
 
             geo_df = self._optional_keyword_filter(geo_df, question)
             geo_df = self._apply_structured_filters(geo_df, hints)
-            if hints.get("oem"):
+            if hints.get("oem") and analysis_intent != "disruption_alternatives":
                 geo_df = self._filter_by_oem(geo_df, str(hints["oem"]))
+
+        if analysis_intent in {"gap_analysis", "disruption_alternatives"}:
+            gap_report = self.spatial_engine.supply_gap_report(
+                capability_term=str(hints["capability_term"]) if hints.get("capability_term") else None,
+                category_term=str(hints["category_term"]) if hints.get("category_term") else None,
+                county_scope=hints.get("counties") if isinstance(hints.get("counties"), list) else None,
+                max_gap_counties=12,
+            )
+            map_context["gap_report"] = gap_report
 
         if plan.get("geo"):
             final_df = geo_df.copy()
         else:
             final_df = self._choose_final_results(sql_df=sql_df, vector_df=vector_df, geo_df=geo_df)
+
+        if final_df.empty and analysis_intent == "gap_analysis":
+            final_df = self._merge_candidates([sql_df, vector_df])
 
         if self._should_reject_as_unsupported(
             question=question,
@@ -169,8 +232,9 @@ class HybridGeospatialRAGPipeline:
             return self._unsupported_response(question=question, plan=plan)
 
         final_df = self._annotate_map_weights(final_df, question=question, plan=plan)
+        final_df = self._annotate_peer_distances(final_df)
 
-        if plan.get("geo") and final_df.empty:
+        if plan.get("geo") and final_df.empty and analysis_intent != "gap_analysis":
             retrieved_chunks = [self._build_geo_no_results_chunk(question=question, hints=hints)]
         else:
             retrieved_chunks = self._build_retrieved_chunks(
@@ -179,8 +243,18 @@ class HybridGeospatialRAGPipeline:
                 sql_df=sql_df,
                 geo_df=geo_df,
                 final_df=final_df,
+                gap_report=gap_report,
+                plan=plan,
             )
-        context = self._format_context(question=question, plan=plan, retrieved_chunks=retrieved_chunks)
+        map_context["result_count"] = int(len(final_df))
+        map_context["county_coverage_count"] = int(final_df["county"].dropna().nunique()) if not final_df.empty and "county" in final_df.columns else 0
+        context = self._format_context(
+            question=question,
+            plan=plan,
+            retrieved_chunks=retrieved_chunks,
+            final_df=final_df,
+            map_context=map_context,
+        )
         answer = self._generate_answer_with_llm(
             question=question,
             context=context,
@@ -194,11 +268,13 @@ class HybridGeospatialRAGPipeline:
             "retrieved_chunks": retrieved_chunks,
             "retrieved_companies": self._df_to_records(final_df.head(25)),
             "plan": plan,
+            "map_context": map_context,
             "model_used": self.llm_model,
         }
 
     def _choose_default_model(self) -> Optional[str]:
         preferred = [
+            "gemma3:27b",
             "gpt-oss:20b",
             "qwen2.5:14b",
             "qwen2.5:7b",
@@ -231,21 +307,45 @@ class HybridGeospatialRAGPipeline:
         except Exception:
             return []
 
+    @staticmethod
+    def _build_initial_map_context(plan: Dict[str, object]) -> Dict[str, object]:
+        hints = plan.get("hints", {}) if isinstance(plan, dict) else {}
+        coords = hints.get("coordinates") if isinstance(hints, dict) else None
+        return {
+            "classification": plan.get("classification") if isinstance(plan, dict) else "VECTOR_QUERY",
+            "analysis_intent": hints.get("analysis_intent") if isinstance(hints, dict) else "standard_retrieval",
+            "map_mode": "standard",
+            "focus_label": hints.get("city") if isinstance(hints, dict) else None,
+            "center_lat": float(coords["lat"]) if isinstance(coords, dict) and "lat" in coords else None,
+            "center_lon": float(coords["lon"]) if isinstance(coords, dict) and "lon" in coords else None,
+            "radius_km": float(hints["radius_km"]) if isinstance(hints, dict) and hints.get("radius_km") is not None else None,
+            "counties": hints.get("counties") if isinstance(hints, dict) and isinstance(hints.get("counties"), list) else [],
+            "gap_report": {},
+            "result_count": 0,
+            "county_coverage_count": 0,
+        }
+
     def _run_sql_retrieval(self, question: str, hints: dict) -> pd.DataFrame:
+        if hints.get("company_name") and str(hints.get("analysis_intent") or "") == "disruption_alternatives":
+            return self.sql_engine.get_companies_by_name(str(hints["company_name"]))
         if hints.get("metric"):
             return self.sql_engine.get_top_companies_by_metric(str(hints["metric"]), limit=15)
         if hints.get("industry_group"):
             return self.sql_engine.get_companies_by_industry(str(hints["industry_group"]))
         if hints.get("oem") and not any(hints.get(key) for key in ["category_term", "capability_term", "city"]):
             return self.sql_engine.get_companies_by_oem(str(hints["oem"]))
-        if any(hints.get(key) for key in ["oem", "category_term", "capability_term", "city"]):
+        if any(hints.get(key) for key in ["oem", "category_term", "capability_term", "city", "company_name", "counties"]):
             return self.sql_engine.search_companies(
                 oem_name=str(hints["oem"]) if hints.get("oem") else None,
                 category_term=str(hints["category_term"]) if hints.get("category_term") else None,
                 capability_term=str(hints["capability_term"]) if hints.get("capability_term") else None,
                 city_term=str(hints["city"]) if hints.get("city") else None,
+                county_names=hints.get("counties") if isinstance(hints.get("counties"), list) else None,
+                company_term=str(hints["company_name"]) if hints.get("company_name") else None,
                 limit=60,
             )
+        if hints.get("company_name"):
+            return self.sql_engine.get_companies_by_name(str(hints["company_name"]))
 
         lower = question.lower()
         if "top" in lower and "employment" in lower:
@@ -268,9 +368,14 @@ class HybridGeospatialRAGPipeline:
         keyword_map = {
             "battery": ["battery"],
             "supplier": ["supplier", "supply"],
+            "manufacturer": ["manufacturing", "manufacturer", "plant"],
+            "manufacturers": ["manufacturing", "manufacturer", "plant"],
             "oem": ["oem"],
             "employment": ["employment", "employees"],
             "stamping": ["stamping"],
+            "thermal": ["thermal", "hvac", "cooling"],
+            "charging": ["charging", "charger"],
+            "wiring": ["wiring", "harness", "connector"],
         }
 
         active_terms: List[str] = []
@@ -281,7 +386,15 @@ class HybridGeospatialRAGPipeline:
         if not active_terms:
             return df
 
-        text_cols = ["chunk_text", "product_service", "ev_supply_chain_role", "industry_group", "primary_oems"]
+        text_cols = [
+            "chunk_text",
+            "product_service",
+            "ev_supply_chain_role",
+            "industry_group",
+            "primary_oems",
+            "primary_facility_type",
+            "category",
+        ]
         existing_cols = [col for col in text_cols if col in df.columns]
         if not existing_cols:
             return df
@@ -306,7 +419,14 @@ class HybridGeospatialRAGPipeline:
             text_cols = [col for col in ["industry_group", "product_service", "ev_supply_chain_role", "chunk_text"] if col in filtered.columns]
             if text_cols:
                 combined = filtered[text_cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
-                mask = combined.str.contains(str(hints["capability_term"]).lower())
+                capability_tokens = [
+                    token
+                    for token in re.findall(r"[a-z0-9]+", str(hints["capability_term"]).lower())
+                    if len(token) > 2
+                ]
+                mask = combined.apply(
+                    lambda text: any(token in text for token in capability_tokens)
+                ) if capability_tokens else combined.str.contains(str(hints["capability_term"]).lower())
                 if mask.any():
                     filtered = filtered[mask].copy()
 
@@ -315,6 +435,16 @@ class HybridGeospatialRAGPipeline:
             if text_cols:
                 combined = filtered[text_cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
                 mask = combined.str.contains(str(hints["city"]).lower())
+                if mask.any():
+                    filtered = filtered[mask].copy()
+
+        if hints.get("counties") and "county" in filtered.columns and isinstance(hints.get("counties"), list):
+            wanted = {str(county).strip().lower().replace(" county", "") for county in hints["counties"] if str(county).strip()}
+            if wanted:
+                county_series = (
+                    filtered["county"].fillna("").astype(str).str.lower().str.replace(" county", "", regex=False).str.strip()
+                )
+                mask = county_series.isin(wanted)
                 if mask.any():
                     filtered = filtered[mask].copy()
 
@@ -327,8 +457,13 @@ class HybridGeospatialRAGPipeline:
             return pd.DataFrame()
 
         merged = pd.concat(non_empty, ignore_index=True, sort=False)
-        if "company" in merged.columns:
-            merged = merged.drop_duplicates(subset=["company"], keep="first")
+        dedupe_cols = [
+            col
+            for col in ["company", "location", "address"]
+            if col in merged.columns
+        ]
+        if dedupe_cols:
+            merged = merged.drop_duplicates(subset=dedupe_cols, keep="first")
         return merged
 
     @staticmethod
@@ -336,10 +471,7 @@ class HybridGeospatialRAGPipeline:
         if not geo_df.empty:
             return geo_df
         if not sql_df.empty and not vector_df.empty:
-            merged = pd.concat([sql_df, vector_df], ignore_index=True, sort=False)
-            if "company" in merged.columns:
-                merged = merged.drop_duplicates(subset=["company"], keep="first")
-            return merged
+            return HybridGeospatialRAGPipeline._merge_candidates([sql_df, vector_df])
         if not sql_df.empty:
             return sql_df
         if not vector_df.empty:
@@ -399,14 +531,19 @@ class HybridGeospatialRAGPipeline:
     def _unsupported_response(self, question: str, plan: Dict[str, object]) -> dict:
         return {
             "answer": (
-                f"I could not find evidence in the GNEM company dataset and coordinate data to answer "
-                f"'{question}'. Ask about companies, OEM relationships, products/services, employment, "
-                "or geospatial proximity in the uploaded sources."
+                "Direct Answer\n"
+                f"I could not find grounded evidence in the GNEM company dataset and Georgia county map to answer '{question}'.\n\n"
+                "Spatial / Supply-Chain Details\n"
+                "Ask about manufacturer locations, county-specific supplier clusters, distance/radius searches, "
+                "OEM relationships, battery/component capabilities, or disruption alternatives in Georgia.\n\n"
+                "Evidence Gaps\n"
+                "No high-confidence SQL/vector/geo matches were available for this prompt."
             ),
             "sources": [],
             "retrieved_chunks": [],
             "retrieved_companies": [],
             "plan": plan,
+            "map_context": self._build_initial_map_context(plan),
             "model_used": "not_called",
         }
 
@@ -416,6 +553,8 @@ class HybridGeospatialRAGPipeline:
 
         out = df.copy()
         hints = plan.get("hints", {}) if isinstance(plan, dict) else {}
+        if "distance_km" in out.columns and "distance_miles" not in out.columns:
+            out["distance_miles"] = pd.to_numeric(out["distance_km"], errors="coerce") * 0.621371
 
         out["map_relevance"] = self._compute_relevance_component(out)
         out["map_query_match"] = self._compute_query_match_component(out, question=question)
@@ -468,6 +607,50 @@ class HybridGeospatialRAGPipeline:
             out["score"] = out["map_weight"]
         else:
             out["score"] = pd.to_numeric(out["score"], errors="coerce").fillna(out["map_weight"])
+        return out
+
+    def _annotate_peer_distances(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or not {"latitude", "longitude", "company"}.issubset(df.columns) or len(df) < 2:
+            return df
+
+        out = df.copy().reset_index(drop=True)
+        nearest_companies: List[Optional[str]] = []
+        nearest_km_values: List[Optional[float]] = []
+
+        for idx, row in out.iterrows():
+            lat = row.get("latitude")
+            lon = row.get("longitude")
+            if pd.isna(lat) or pd.isna(lon):
+                nearest_companies.append(None)
+                nearest_km_values.append(None)
+                continue
+
+            others = out.drop(index=idx)
+            others = others.dropna(subset=["latitude", "longitude"]).copy()
+            distinct_others = others[others["company"].astype(str) != str(row.get("company"))].copy()
+            if not distinct_others.empty:
+                others = distinct_others
+            if others.empty:
+                nearest_companies.append(None)
+                nearest_km_values.append(None)
+                continue
+
+            distances = self.spatial_engine._haversine_km(
+                lat1=float(lat),
+                lon1=float(lon),
+                lat2_series=others["latitude"],
+                lon2_series=others["longitude"],
+            )
+            best_idx = distances.idxmin()
+            nearest_companies.append(str(others.loc[best_idx, "company"]))
+            nearest_km = float(distances.loc[best_idx])
+            nearest_km_values.append(round(nearest_km, 3))
+
+        out["nearest_peer_company"] = nearest_companies
+        out["nearest_peer_distance_km"] = nearest_km_values
+        out["nearest_peer_distance_miles"] = pd.to_numeric(
+            out["nearest_peer_distance_km"], errors="coerce"
+        ) * 0.621371
         return out
 
     @staticmethod
@@ -578,7 +761,8 @@ class HybridGeospatialRAGPipeline:
         oem_term = str(hints.get("oem") or "").lower()
         if category_term and category_term in category:
             score += 0.15
-        if capability_term and capability_term in combined:
+        capability_tokens = [token for token in re.findall(r"[a-z0-9]+", capability_term) if len(token) > 2]
+        if capability_tokens and any(token in combined for token in capability_tokens):
             score += 0.15
         if oem_term and oem_term in oems:
             score += 0.15
@@ -589,8 +773,12 @@ class HybridGeospatialRAGPipeline:
     def _build_geo_no_results_chunk(question: str, hints: dict) -> Dict[str, object]:
         radius_km = hints.get("radius_km")
         radius_text = f"{float(radius_km):.1f} km" if radius_km is not None else "the requested radius"
-        if hints.get("city"):
+        if hints.get("company_name"):
+            target = f"around {hints['company_name']}"
+        elif hints.get("city"):
             target = f"near {hints['city']}"
+        elif hints.get("counties"):
+            target = f"in counties {', '.join(str(c) for c in hints['counties'])}"
         elif hints.get("coordinates"):
             coords = hints["coordinates"]
             target = f"near coordinates ({coords.get('lat')}, {coords.get('lon')})"
@@ -626,12 +814,42 @@ class HybridGeospatialRAGPipeline:
         sql_df: pd.DataFrame,
         geo_df: pd.DataFrame,
         final_df: pd.DataFrame,
+        gap_report: Optional[Dict[str, object]] = None,
+        plan: Optional[Dict[str, object]] = None,
     ) -> List[Dict[str, object]]:
         chunks: List[Dict[str, object]] = []
         final_companies = set(final_df["company"].dropna().astype(str).tolist()) if "company" in final_df.columns else set()
+        hints = plan.get("hints", {}) if isinstance(plan, dict) else {}
+        analysis_intent = str(hints.get("analysis_intent") or "standard_retrieval")
+
+        if gap_report and gap_report.get("gap_county_count"):
+            top_gap_names = [
+                str(item.get("county"))
+                for item in gap_report.get("gap_counties", [])[:6]
+                if item.get("county")
+            ]
+            chunks.append(
+                {
+                    "engine": "geo",
+                    "company": None,
+                    "chunk_type": "coverage_gap_summary",
+                    "score": 1.2,
+                    "text": (
+                        f"Gap analysis found {gap_report.get('gap_county_count')} uncovered counties "
+                        f"out of {gap_report.get('scope_county_count')} in scope. "
+                        f"Highest-distance gap counties include: {', '.join(top_gap_names) if top_gap_names else 'N/A'}."
+                    ),
+                    "meta": {
+                        "gap_county_count": gap_report.get("gap_county_count"),
+                        "covered_county_count": gap_report.get("covered_county_count"),
+                        "top_gap_counties": gap_report.get("gap_counties", [])[:8],
+                    },
+                    "priority": 0,
+                }
+            )
 
         if not vector_df.empty:
-            for _, row in vector_df.head(6).iterrows():
+            for _, row in vector_df.head(8).iterrows():
                 chunks.append(
                     {
                         "engine": "vector",
@@ -649,28 +867,44 @@ class HybridGeospatialRAGPipeline:
                 )
 
         if not geo_df.empty:
-            for rank, (_, row) in enumerate(geo_df.head(4).iterrows(), start=1):
+            for rank, (_, row) in enumerate(geo_df.head(6).iterrows(), start=1):
                 distance_km = row.get("distance_km")
-                dist_txt = f"{float(distance_km):.2f} km" if pd.notna(distance_km) else "unknown"
-                text = (
-                    f"Geo match for {row.get('company')}: "
-                    f"{row.get('city')}, {row.get('county')} at distance {dist_txt}; "
-                    f"lat={row.get('latitude')}, lon={row.get('longitude')}."
-                )
+                dist_txt = f"{float(distance_km):.2f} km / {float(distance_km) * 0.621371:.2f} mi" if pd.notna(distance_km) else "unknown"
+                if analysis_intent == "disruption_alternatives" and row.get("disrupted_company"):
+                    text = (
+                        f"Alternative supplier candidate for {row.get('disrupted_company')}: {row.get('company')} "
+                        f"in {row.get('city')}, {row.get('county')} at {dist_txt}. "
+                        f"Match reason: {row.get('match_reason') or 'nearby supplier candidate'}. "
+                        f"Product/service: {row.get('product_service') or 'unknown'}."
+                    )
+                    chunk_type = "alternative_supplier"
+                else:
+                    text = (
+                        f"Geo match for {row.get('company')}: "
+                        f"{row.get('city')}, {row.get('county')} at distance {dist_txt}; "
+                        f"lat={row.get('latitude')}, lon={row.get('longitude')}. "
+                        f"Role={row.get('ev_supply_chain_role')}; Product={row.get('product_service')}."
+                    )
+                    chunk_type = "geo_match"
                 chunks.append(
                     {
                         "engine": "geo",
                         "company": row.get("company"),
-                        "chunk_type": "geo_match",
+                        "chunk_type": chunk_type,
                         "score": 1.0 / rank,
                         "text": text,
-                        "meta": {"distance_km": distance_km},
+                        "meta": {
+                            "distance_km": distance_km,
+                            "distance_miles": row.get("distance_miles"),
+                            "match_reason": row.get("match_reason"),
+                            "disrupted_company": row.get("disrupted_company"),
+                        },
                         "priority": 1,
                     }
                 )
 
         if not sql_df.empty:
-            for rank, (_, row) in enumerate(sql_df.head(4).iterrows(), start=1):
+            for rank, (_, row) in enumerate(sql_df.head(6).iterrows(), start=1):
                 metric_value = row.get("metric_value", row.get("employment"))
                 text = (
                     f"SQL result for {row.get('company')}: "
@@ -705,7 +939,7 @@ class HybridGeospatialRAGPipeline:
             ]
 
         out: List[Dict[str, object]] = []
-        for idx, chunk in enumerate(chunks[:8], start=1):
+        for idx, chunk in enumerate(chunks[:10], start=1):
             out.append(
                 {
                     "chunk_id": f"C{idx}",
@@ -736,12 +970,67 @@ class HybridGeospatialRAGPipeline:
             out.append(chunk)
         return out
 
-    def _format_context(self, question: str, plan: dict, retrieved_chunks: List[Dict[str, object]]) -> str:
+    def _format_context(
+        self,
+        question: str,
+        plan: dict,
+        retrieved_chunks: List[Dict[str, object]],
+        final_df: Optional[pd.DataFrame] = None,
+        map_context: Optional[Dict[str, object]] = None,
+    ) -> str:
         lines = [
             f"Question: {question}",
             f"Plan Classification: {plan.get('classification')}",
-            "Retrieved Chunks:",
+            f"Analysis Intent: {(plan.get('hints', {}) or {}).get('analysis_intent', 'standard_retrieval')}",
         ]
+        if map_context:
+            lines.append(
+                "Map Context: "
+                f"mode={map_context.get('map_mode')}, "
+                f"focus={map_context.get('focus_label')}, "
+                f"center=({map_context.get('center_lat')}, {map_context.get('center_lon')}), "
+                f"radius_km={map_context.get('radius_km')}, "
+                f"counties={map_context.get('counties')}, "
+                f"result_count={map_context.get('result_count')}, "
+                f"county_coverage_count={map_context.get('county_coverage_count')}"
+            )
+            gap_report = map_context.get("gap_report") if isinstance(map_context.get("gap_report"), dict) else {}
+            if gap_report:
+                lines.append(
+                    "Gap Report: "
+                    f"covered_counties={gap_report.get('covered_county_count')}, "
+                    f"gap_counties={gap_report.get('gap_county_count')}, "
+                    f"top_gap_counties={gap_report.get('gap_counties', [])[:5]}"
+                )
+
+        if final_df is not None and not final_df.empty:
+            lines.append("Top Retrieved Companies:")
+            show_cols = [
+                col
+                for col in [
+                    "company",
+                    "city",
+                    "county",
+                    "category",
+                    "ev_supply_chain_role",
+                    "product_service",
+                    "distance_km",
+                    "match_reason",
+                ]
+                if col in final_df.columns
+            ]
+            for _, row in final_df.head(8).iterrows():
+                parts = []
+                for col in show_cols:
+                    value = row.get(col)
+                    if pd.notna(value) and str(value).strip():
+                        if col == "distance_km":
+                            parts.append(f"{col}={float(value):.2f}")
+                        else:
+                            parts.append(f"{col}={str(value).strip()}")
+                if parts:
+                    lines.append(" - " + " | ".join(parts))
+        lines.append("Retrieved Chunks:")
         for chunk in retrieved_chunks:
             company = chunk.get("company") or "N/A"
             chunk_text = str(chunk.get("text", "")).strip()
@@ -772,18 +1061,27 @@ class HybridGeospatialRAGPipeline:
         preferred_companies: Optional[List[str]] = None,
     ) -> str:
         self.available_models = self._list_available_models()
+        if not self.available_models and self.llm_model == "retrieval-fallback":
+            return self._fast_fallback_answer(
+                question=question,
+                retrieved_chunks=retrieved_chunks,
+                error=None,
+                preferred_companies=preferred_companies or [],
+            )
         system_prompt = (
-            "You are a geospatial enterprise analyst. "
+            "You are a production geospatial EV supply-chain intelligence analyst. "
             "You MUST answer only from the retrieved chunks and cite chunk IDs like [C3]. "
-            "If evidence is missing or ambiguous, say so clearly."
+            "If evidence is missing or ambiguous, say so clearly. "
+            "Prefer concise operational analysis with distances, counties, supplier roles, and backup options."
         )
         user_prompt = (
             f"{context}\n\n"
             "Instructions:\n"
-            "1. Answer the question directly.\n"
-            "2. Include at least 2 chunk citations when evidence exists.\n"
-            "3. Do not fabricate company names, distances, OEM links, or metrics.\n"
-            "4. End with a short 'Evidence Gaps' line."
+            "1. Write 3 compact sections with these headings exactly: Direct Answer, Spatial / Supply-Chain Details, Evidence Gaps.\n"
+            "2. Include distances in both km and miles when distance evidence exists.\n"
+            "3. For disruption or gap questions, identify operational implications and nearby alternatives or uncovered counties.\n"
+            "4. Include at least 2 chunk citations when evidence exists.\n"
+            "5. Do not fabricate company names, distances, OEM links, or metrics."
         )
         model_candidates = [self.llm_model] + self._oom_fallback_candidates(self.llm_model)
         max_model_attempts = int(os.getenv("OLLAMA_MAX_MODEL_ATTEMPTS", "2"))
@@ -799,9 +1097,9 @@ class HybridGeospatialRAGPipeline:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=80,
+                    max_tokens=420,
                     timeout=request_timeout,
-                    extra_body={"options": {"num_predict": 80, "num_ctx": 1024}},
+                    extra_body={"options": {"num_predict": 420, "num_ctx": 4096}},
                 )
                 content = self._normalize_message_text(
                     response.choices[0].message.content if response.choices else None
@@ -923,15 +1221,36 @@ class HybridGeospatialRAGPipeline:
     ) -> str:
         if retrieved_chunks:
             first_chunk = retrieved_chunks[0]
+            has_alternative_chunks = any(
+                chunk.get("chunk_type") == "alternative_supplier" and chunk.get("company")
+                for chunk in retrieved_chunks
+            )
+            if first_chunk.get("chunk_type") == "coverage_gap_summary" and not has_alternative_chunks:
+                return (
+                    "Direct Answer\n"
+                    f"{first_chunk.get('text')} [C1]\n\n"
+                    "Spatial / Supply-Chain Details\n"
+                    "Use the red county shading on the map and the retrieved supplier table to inspect where capability coverage is sparse or absent.\n\n"
+                    "Evidence Gaps\n"
+                    "Ollama response timed out or failed, so this answer uses the computed gap summary and retrieved records only."
+                )
             if first_chunk.get("chunk_type") == "geo_no_results":
                 return (
-                    f"{first_chunk.get('text')} [C1]\n"
-                    "Evidence Gaps: Ollama response timed out, so this answer is based on retrieval only."
+                    "Direct Answer\n"
+                    f"{first_chunk.get('text')} [C1]\n\n"
+                    "Spatial / Supply-Chain Details\n"
+                    "No facilities matched the requested spatial and business filters in the indexed Georgia dataset.\n\n"
+                    "Evidence Gaps\n"
+                    "Ollama response timed out or failed, so this answer is based on retrieval only."
                 )
             if first_chunk.get("chunk_type") == "no_results":
                 return (
-                    f"{first_chunk.get('text')} [C1]\n"
-                    "Evidence Gaps: Ollama response timed out, and retrieval did not return supporting records."
+                    "Direct Answer\n"
+                    f"{first_chunk.get('text')} [C1]\n\n"
+                    "Spatial / Supply-Chain Details\n"
+                    "The retrieval layer did not return company, location, or supply-chain records for this question.\n\n"
+                    "Evidence Gaps\n"
+                    "Ollama response timed out or failed, and retrieval had no supporting records."
                 )
 
         companies: List[str] = []
@@ -960,13 +1279,35 @@ class HybridGeospatialRAGPipeline:
         if companies:
             refs = " ".join(citations[:2]) if citations else ""
             items = ", ".join(companies[:4])
+            geo_details = []
+            for chunk in retrieved_chunks:
+                if chunk.get("engine") != "geo" or not chunk.get("company"):
+                    continue
+                meta = chunk.get("meta", {}) if isinstance(chunk.get("meta", {}), dict) else {}
+                distance_km = meta.get("distance_km")
+                if distance_km is not None:
+                    geo_details.append(
+                        f"{chunk.get('company')} at {float(distance_km):.1f} km / {float(distance_km) * 0.621371:.1f} mi"
+                    )
+                elif chunk.get("chunk_type") == "alternative_supplier":
+                    geo_details.append(str(chunk.get("text", "")).split(".")[0])
+                if len(geo_details) >= 3:
+                    break
+            spatial_detail = "; ".join(geo_details) if geo_details else "Open the map and table to compare counties, distances, and company roles for these facilities."
             return (
-                f"Top matches based on retrieved evidence for '{question}': {items}. "
-                f"{refs}\nEvidence Gaps: Ollama response timed out, so this is a fast fallback summary."
+                "Direct Answer\n"
+                f"Top matches based on retrieved evidence for '{question}': {items}. {refs}\n\n"
+                "Spatial / Supply-Chain Details\n"
+                f"{spatial_detail}\n\n"
+                "Evidence Gaps\n"
+                "Ollama response timed out or failed, so this is a fast retrieval-only fallback summary."
             )
 
         return (
-            f"I could not generate a model answer in time for '{question}'. "
-            "No high-confidence chunks were available. "
-            "Evidence Gaps: backend fell back due Ollama timeout."
+            "Direct Answer\n"
+            f"I could not generate a model answer in time for '{question}'.\n\n"
+            "Spatial / Supply-Chain Details\n"
+            "No high-confidence chunks were available to summarize from the indexed GNEM sources.\n\n"
+            "Evidence Gaps\n"
+            "Backend fell back because Ollama timed out or returned no usable text."
         )

@@ -1,11 +1,12 @@
-# Hybrid Geospatial RAG Chatbot (Ollama LLM-Only)
+# Georgia EV Supply Chain GeoRAG
 
-This prototype answers questions by combining:
+This app answers EV supply-chain questions with county-aware geospatial retrieval and evidence-grounded RAG over the uploaded Georgia datasets:
 
 - SQL retrieval over GNEM company data (`DuckDB`)
-- Geospatial distance filtering (`geopy`)
-- Semantic chunk retrieval (`FAISS` + `sentence-transformers`)
-- Final answer generation using a local Ollama model only (no deterministic fallback)
+- County and radius search over `Counties_Georgia.geojson`
+- Semantic chunk retrieval over facility-aware company chunks (`FAISS` + `sentence-transformers` when available, hashed fallback otherwise)
+- Supply-gap and disruption-alternative analytics
+- Final answer generation using local Ollama when available, with a retrieval-only fallback if no model is pulled
 
 Architecture:
 
@@ -55,21 +56,23 @@ ollama serve
 2. Pull a model:
 
 ```bash
-ollama pull qwen3:14b
+ollama pull gemma3:27b
 ```
 
 3. (Optional) Set explicit model and endpoint:
 
 ```bash
-set OLLAMA_MODEL=qwen3:14b
-set OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
+export OLLAMA_MODEL=gemma3:27b
+export OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
 ```
 
-If `OLLAMA_MODEL` is not set, backend auto-selects the best available pulled model from your local Ollama registry.
+If `OLLAMA_MODEL` is not set, backend auto-selects the best available pulled model from your local Ollama registry, preferring `gemma3:27b`.
+If no Ollama model is available, the API still returns retrieval-only answers, map layers, and source citations with `model_used = "retrieval-fallback"`.
 
 ### Suggested Models for This RAG Pipeline
 
-- `qwen3:14b` for best balance of quality and local speed.
+- `gemma3:27b` for stronger answer quality if your hardware can run it.
+- `qwen3:14b` for a lighter fallback if `gemma3:27b` is too heavy.
 - `gpt-oss:20b` for stronger reasoning quality if hardware allows.
 - `deepseek-r1:14b` if you want stronger deliberate reasoning style.
 
@@ -81,16 +84,17 @@ If you set a model that does not fit memory, backend will auto-retry smaller loc
 
 `backend/ingestion.py` does:
 
-1. Load GNEM Excel and clean column names
-2. Parse city/county from location fields
-3. Merge explicit company latitude/longitude from `GNEM - Auto Landscape Lat Long Updated File (1).xlsx` when present
-4. Fall back to county centroid lat/lon from `Counties_Georgia.geojson` when explicit coordinates are unavailable
-5. Write `companies` table to DuckDB
-6. Build field-aware chunk records (improved chunking):
+1. Load `GNEM - Auto Landscape Lat Long Updated File (1).xlsx` as the canonical source workbook
+2. Normalize company/location columns and preserve duplicate same-site rows when products or roles differ
+3. Parse city/county from location/address strings and infer county from point-in-polygon checks against `Counties_Georgia.geojson`
+4. Fall back to county centroids when coordinates are missing or land outside the declared Georgia county polygon
+5. Write the canonical `companies` table to DuckDB
+6. Build facility-aware chunk records:
    - `company_profile`
    - `supply_chain`
    - `products_capabilities`
    - `geo_operations`
+   - `resilience_network`
 7. Write `company_chunks` table to DuckDB
 8. Embed chunk texts and index in FAISS
 9. Save chunk metadata JSON for citation tracing
@@ -120,17 +124,19 @@ Response includes:
 - `retrieved_chunks` (full chunk metadata used for context)
 - `retrieved_companies` (tabular view)
 - `plan` (query planner output)
+- `map_context` (query center, county filters, radius, coverage/gap report)
 - `model_used` (active Ollama model)
 
 ## UI
 
 `frontend/app.py` provides:
 
-- Chat interface + conversation history
-- Chunk-level source citations
-- Detailed retrieved chunk table
-- Supplier coordinate map with heatmap + point markers
-- Retrieved companies table
+- Preset prompt chips for radius search, county filtering, gap analysis, and disruption alternatives
+- Citation-highlighted answer panel with `Direct Answer`, `Spatial / Supply-Chain Details`, and `Evidence Gaps`
+- County choropleth over Georgia GeoJSON, weighted supplier markers, radius overlays, and hub-to-supplier arcs
+- Gap counties highlighted in red when `SUPPLY_CHAIN_GAP_QUERY` is active
+- Ranked company table with category, product/service, OEMs, km/mi distance, nearest-peer distance, match reason, map weight, and coordinate provenance
+- Retrieved chunk cards for evidence inspection
 
 Map colors indicate coordinate provenance:
 
@@ -140,5 +146,5 @@ Map colors indicate coordinate provenance:
 
 ## Notes
 
-- This pipeline is LLM-only for final answers. If Ollama/model is unavailable, `/chat` returns an error.
-- For best quality, use a stronger model than `tinyllama` (for example `qwen3:14b`).
+- For best natural-language synthesis, use a stronger local model than `tinyllama` (for example `qwen3:14b`).
+- One row in the uploaded workbook (`Valeo`) does not contain location or coordinates, so it is retained in retrieval but cannot be plotted until those fields are supplied.

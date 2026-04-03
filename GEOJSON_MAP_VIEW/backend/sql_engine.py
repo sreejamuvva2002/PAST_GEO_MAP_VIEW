@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
 
 import duckdb
 import pandas as pd
@@ -20,12 +20,34 @@ class SQLEngine:
         with duckdb.connect(str(self.db_path), read_only=True) as con:
             return con.execute(sql, params or []).fetchdf()
 
+    @staticmethod
+    def _select_columns(extra_columns: str = "") -> str:
+        base = """
+                company, category, industry_group, location, address, city, county,
+                ev_supply_chain_role, primary_oems, supplier_or_affiliation_type,
+                employment, product_service, ev_battery_relevant, primary_facility_type,
+                latitude, longitude, coordinate_source
+        """
+        return f"{base}, {extra_columns}" if extra_columns else base
+
+    def list_company_names(self) -> List[str]:
+        df = self._query(
+            """
+            SELECT DISTINCT company
+            FROM companies
+            WHERE company IS NOT NULL AND TRIM(company) != ''
+            ORDER BY company
+            """
+        )
+        return df["company"].dropna().astype(str).tolist() if not df.empty else []
+
     def get_companies_by_oem(self, oem_name: str) -> pd.DataFrame:
         pattern = f"%{oem_name.lower()}%"
         sql = """
             SELECT
-                company, category, industry_group, location, city, county,
-                ev_supply_chain_role, primary_oems, employment, product_service,
+                company, category, industry_group, location, address, city, county,
+                ev_supply_chain_role, primary_oems, supplier_or_affiliation_type,
+                employment, product_service, ev_battery_relevant, primary_facility_type,
                 latitude, longitude, coordinate_source
             FROM companies
             WHERE LOWER(COALESCE(primary_oems, '')) LIKE ?
@@ -46,8 +68,9 @@ class SQLEngine:
         column = metric_map[metric_key]
         sql = f"""
             SELECT
-                company, category, industry_group, location, city, county,
-                ev_supply_chain_role, primary_oems, employment, product_service,
+                company, category, industry_group, location, address, city, county,
+                ev_supply_chain_role, primary_oems, supplier_or_affiliation_type,
+                employment, product_service, ev_battery_relevant, primary_facility_type,
                 latitude, longitude, coordinate_source,
                 {column} AS metric_value
             FROM companies
@@ -61,8 +84,9 @@ class SQLEngine:
         pattern = f"%{industry_group.lower()}%"
         sql = """
             SELECT
-                company, category, industry_group, location, city, county,
-                ev_supply_chain_role, primary_oems, employment, product_service,
+                company, category, industry_group, location, address, city, county,
+                ev_supply_chain_role, primary_oems, supplier_or_affiliation_type,
+                employment, product_service, ev_battery_relevant, primary_facility_type,
                 latitude, longitude, coordinate_source
             FROM companies
             WHERE LOWER(COALESCE(industry_group, '')) LIKE ?
@@ -70,12 +94,28 @@ class SQLEngine:
         """
         return self._query(sql, [pattern])
 
+    def get_companies_by_name(self, company_name: str) -> pd.DataFrame:
+        pattern = f"%{company_name.lower()}%"
+        sql = """
+            SELECT
+                company, category, industry_group, location, address, city, county,
+                ev_supply_chain_role, primary_oems, supplier_or_affiliation_type,
+                employment, product_service, ev_battery_relevant, primary_facility_type,
+                latitude, longitude, coordinate_source
+            FROM companies
+            WHERE LOWER(COALESCE(company, '')) LIKE ?
+            ORDER BY employment DESC NULLS LAST, company, location
+        """
+        return self._query(sql, [pattern])
+
     def search_companies(
         self,
-        oem_name: str | None = None,
-        category_term: str | None = None,
-        capability_term: str | None = None,
-        city_term: str | None = None,
+        oem_name: Optional[str] = None,
+        category_term: Optional[str] = None,
+        capability_term: Optional[str] = None,
+        city_term: Optional[str] = None,
+        county_names: Optional[List[str]] = None,
+        company_term: Optional[str] = None,
         limit: int = 50,
     ) -> pd.DataFrame:
         clauses = []
@@ -105,12 +145,20 @@ class SQLEngine:
                 ")"
             )
             params.extend([f"%{city_term.lower()}%"] * 3)
+        if county_names:
+            placeholders = ", ".join(["?"] * len(county_names))
+            clauses.append(f"LOWER(COALESCE(county, '')) IN ({placeholders})")
+            params.extend([county.lower() for county in county_names])
+        if company_term:
+            clauses.append("LOWER(COALESCE(company, '')) LIKE ?")
+            params.append(f"%{company_term.lower()}%")
 
         where_sql = " AND ".join(clauses) if clauses else "1=1"
         sql = f"""
             SELECT
-                company, category, industry_group, location, city, county,
-                ev_supply_chain_role, primary_oems, employment, product_service,
+                company, category, industry_group, location, address, city, county,
+                ev_supply_chain_role, primary_oems, supplier_or_affiliation_type,
+                employment, product_service, ev_battery_relevant, primary_facility_type,
                 latitude, longitude, coordinate_source
             FROM companies
             WHERE {where_sql}
