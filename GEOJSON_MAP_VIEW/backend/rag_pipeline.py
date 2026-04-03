@@ -850,6 +850,9 @@ class HybridGeospatialRAGPipeline:
 
         if not vector_df.empty:
             for _, row in vector_df.head(8).iterrows():
+                company_name = str(row.get("company") or "").strip()
+                if final_companies and company_name and company_name not in final_companies:
+                    continue
                 chunks.append(
                     {
                         "engine": "vector",
@@ -905,6 +908,9 @@ class HybridGeospatialRAGPipeline:
 
         if not sql_df.empty:
             for rank, (_, row) in enumerate(sql_df.head(6).iterrows(), start=1):
+                company_name = str(row.get("company") or "").strip()
+                if final_companies and company_name and company_name not in final_companies:
+                    continue
                 metric_value = row.get("metric_value", row.get("employment"))
                 text = (
                     f"SQL result for {row.get('company')}: "
@@ -939,7 +945,8 @@ class HybridGeospatialRAGPipeline:
             ]
 
         out: List[Dict[str, object]] = []
-        for idx, chunk in enumerate(chunks[:10], start=1):
+        max_chunks = 6 if final_companies else 8
+        for idx, chunk in enumerate(chunks[:max_chunks], start=1):
             out.append(
                 {
                     "chunk_id": f"C{idx}",
@@ -1081,7 +1088,9 @@ class HybridGeospatialRAGPipeline:
             "2. Include distances in both km and miles when distance evidence exists.\n"
             "3. For disruption or gap questions, identify operational implications and nearby alternatives or uncovered counties.\n"
             "4. Include at least 2 chunk citations when evidence exists.\n"
-            "5. Do not fabricate company names, distances, OEM links, or metrics."
+            "5. Do not fabricate company names, distances, OEM links, or metrics.\n"
+            "6. Do not repeat the user question.\n"
+            "7. Do not use markdown heading symbols like #, ##, or ###."
         )
         model_candidates = [self.llm_model] + self._oom_fallback_candidates(self.llm_model)
         max_model_attempts = int(os.getenv("OLLAMA_MAX_MODEL_ATTEMPTS", "2"))

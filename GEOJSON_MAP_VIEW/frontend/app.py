@@ -19,7 +19,7 @@ import pydeck as pdk
 import streamlit as st
 
 st.set_page_config(
-    page_title="Georgia EV Supply Chain GeoRAG",
+    page_title="Georgia EV Supply Chain GeoRAG Chatbot",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -198,11 +198,42 @@ def inject_styles() -> None:
             visibility: hidden;
         }}
 
+        [data-testid="stHeaderActionElements"],
+        [data-testid="stHeadingActionElements"],
+        [data-testid="stMarkdownContainer"] a[href^="#"],
+        [data-testid="stMarkdownContainer"] .anchor-link,
+        [data-testid="stMarkdownContainer"] [class*="anchor"],
+        [data-testid="stMarkdownContainer"] [class*="Anchor"],
+        [data-testid="stMarkdownContainer"] [aria-label*="link" i],
+        .answer-body a[href^="#"],
+        .answer-body h1 a,
+        .answer-body h2 a,
+        .answer-body h3 a {{
+            display: none !important;
+            visibility: hidden !important;
+            width: 0 !important;
+            height: 0 !important;
+        }}
+
         .stApp {{
             background:
                 radial-gradient(circle at top left, rgba(18, 137, 127, 0.10), transparent 30%),
                 linear-gradient(180deg, #f8fbfc 0%, {PALETTE["bg"]} 42%, #eef3f6 100%);
             color: {PALETTE["ink"]};
+            overflow-x: hidden;
+        }}
+
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > .main {{
+            overflow-x: hidden;
+        }}
+
+        [data-testid="stMainBlockContainer"] {{
+            width: calc(100% - clamp(1.5rem, 2.4vw, 2.5rem)) !important;
+            max-width: calc(100vw - 8rem) !important;
+            margin-right: clamp(1.5rem, 2.4vw, 2.5rem) !important;
+            box-sizing: border-box !important;
+            overflow-x: hidden;
         }}
 
         [data-testid="stHeader"] {{
@@ -210,9 +241,15 @@ def inject_styles() -> None:
         }}
 
         .block-container {{
-            max-width: 1720px;
+            width: calc(100% - clamp(1.5rem, 2.4vw, 2.5rem));
+            max-width: min(1720px, calc(100vw - 8rem));
+            margin-left: auto;
+            margin-right: clamp(1.5rem, 2.4vw, 2.5rem);
             padding-top: 1.25rem;
+            padding-left: clamp(1.5rem, 2.4vw, 2.5rem) !important;
+            padding-right: clamp(1.5rem, 2.4vw, 2.5rem) !important;
             padding-bottom: 1.6rem;
+            box-sizing: border-box;
         }}
 
         .hero-shell {{
@@ -221,8 +258,18 @@ def inject_styles() -> None:
                 linear-gradient(135deg, #ffffff 0%, #f7fafc 60%, #eef7f7 100%);
             border: 1px solid {PALETTE["border"]};
             border-radius: 28px;
+            width: 100%;
+            max-width: 100%;
+            margin-top: 1.35rem;
             padding: 1.4rem 1.6rem 1.35rem;
             box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
+            box-sizing: border-box;
+            transition: transform 180ms ease, box-shadow 180ms ease;
+        }}
+
+        .hero-shell:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 22px 48px rgba(15, 23, 42, 0.11);
         }}
 
         .hero-topline {{
@@ -282,34 +329,43 @@ def inject_styles() -> None:
         }}
 
         .metrics-row {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.65rem;
-            margin-top: 1rem;
+            display: none;
         }}
 
-        .metric-chip {{
-            background: #f7fafc;
-            border: 1px solid {PALETTE["border"]};
-            border-radius: 18px;
-            padding: 0.7rem 0.95rem;
-            min-width: 150px;
+        [data-testid="stMetric"] {{
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
+            border: 1px solid #d7e1ea;
+            border-radius: 22px;
+            padding: 0.9rem 1rem;
+            box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
+            transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
         }}
 
-        .metric-label {{
+        [data-testid="stMetric"]:hover {{
+            transform: translateY(-2px);
+            border-color: rgba(18, 137, 127, 0.22);
+            box-shadow: 0 18px 36px rgba(15, 23, 42, 0.09);
+        }}
+
+        [data-testid="stMetricLabel"] {{
             font-size: 0.69rem;
             font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 0.12em;
             color: {PALETTE["muted"]};
-            margin-bottom: 0.3rem;
         }}
 
-        .metric-value {{
+        [data-testid="stMetricValue"] {{
             font-size: 1rem;
             font-weight: 800;
             color: {PALETTE["ink"]};
             letter-spacing: -0.03em;
+        }}
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+            width: 100%;
+            max-width: 100%;
+            box-sizing: border-box;
         }}
 
         div[data-testid="stVerticalBlockBorderWrapper"] > div {{
@@ -317,6 +373,17 @@ def inject_styles() -> None:
             border: 1px solid {PALETTE["border"]} !important;
             box-shadow: 0 14px 32px rgba(15, 23, 42, 0.07);
             background: {PALETTE["panel"]};
+            width: 100% !important;
+            max-width: 100% !important;
+            padding: 1.15rem 1.3rem 1.3rem !important;
+            box-sizing: border-box !important;
+            overflow: hidden;
+            transition: box-shadow 160ms ease, border-color 160ms ease;
+        }}
+
+        div[data-testid="stVerticalBlockBorderWrapper"] > div:hover {{
+            border-color: rgba(18, 137, 127, 0.16) !important;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.09);
         }}
 
         div[data-testid="stTextInput"] input {{
@@ -327,10 +394,17 @@ def inject_styles() -> None:
             padding: 1rem 1.05rem;
             font-size: 0.96rem;
             box-shadow: 0 10px 22px rgba(15, 23, 42, 0.05);
+            transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+        }}
+
+        div[data-testid="stTextInput"] input:focus {{
+            border-color: rgba(18, 137, 127, 0.55);
+            box-shadow: 0 0 0 4px rgba(18, 137, 127, 0.10), 0 14px 28px rgba(15, 23, 42, 0.06);
         }}
 
         button[data-testid="stBaseButton-primary"] {{
-            width: 100%;
+            width: calc(100% - 0.35rem);
+            max-width: calc(100% - 0.35rem);
             border: 0;
             border-radius: 18px;
             background: linear-gradient(135deg, #12897f 0%, #0f766e 45%, #0b5f59 100%);
@@ -340,12 +414,17 @@ def inject_styles() -> None:
             letter-spacing: 0.08em;
             text-transform: uppercase;
             padding: 0.98rem 1.15rem;
+            margin-right: 0.35rem;
+            box-sizing: border-box;
             box-shadow: 0 14px 28px rgba(15, 118, 110, 0.22);
+            transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
         }}
 
         button[data-testid="stBaseButton-primary"]:hover {{
             background: linear-gradient(135deg, #0f766e 0%, #0b5f59 100%);
             color: #ffffff;
+            transform: translateY(-1px);
+            box-shadow: 0 18px 32px rgba(15, 118, 110, 0.28);
         }}
 
         h1, h2, h3, p, label, span, div {{
@@ -358,28 +437,37 @@ def inject_styles() -> None:
             letter-spacing: 0.14em;
             text-transform: uppercase;
             color: {PALETTE["teal"]};
-            margin-bottom: 0.35rem;
+            margin-bottom: 0.4rem;
+            text-align: left;
         }}
 
         .section-heading {{
-            font-size: 1.2rem;
+            font-size: 1.22rem;
             font-weight: 800;
             letter-spacing: -0.04em;
             color: {PALETTE["ink"]};
-            margin-bottom: 0.2rem;
+            margin-bottom: 0.28rem;
+            text-align: left;
         }}
 
         .section-subtitle {{
             font-size: 0.82rem;
-            line-height: 1.45;
+            line-height: 1.55;
             color: {PALETTE["muted"]};
             margin-bottom: 0.75rem;
+            text-align: left;
         }}
 
         .answer-body {{
-            font-size: 0.98rem;
-            line-height: 1.65;
+            font-size: 0.95rem;
+            line-height: 1.78;
             color: {PALETTE["ink"]};
+            letter-spacing: -0.015em;
+            text-align: left;
+            padding: 0 0.1rem 0.15rem;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }}
 
         .citation-chip {{
@@ -388,17 +476,28 @@ def inject_styles() -> None:
             color: {PALETTE["teal"]};
             border: 1px solid rgba(18, 137, 127, 0.16);
             border-radius: 999px;
-            padding: 0.08rem 0.45rem;
+            padding: 0.1rem 0.48rem;
             font-size: 0.78rem;
             font-weight: 800;
+            margin-left: 0.12rem;
         }}
 
         .evidence-card {{
-            background: #f8fbfc;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
             border: 1px solid {PALETTE["border"]};
-            border-radius: 18px;
-            padding: 0.85rem 0.95rem;
+            border-radius: 20px;
+            width: 100%;
+            max-width: 100%;
+            padding: 0.9rem 1rem;
             margin-bottom: 0.7rem;
+            box-sizing: border-box;
+            transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+        }}
+
+        .evidence-card:hover {{
+            transform: translateY(-2px);
+            border-color: rgba(56, 111, 164, 0.22);
+            box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
         }}
 
         .evidence-topline {{
@@ -407,6 +506,18 @@ def inject_styles() -> None:
             align-items: center;
             gap: 0.8rem;
             margin-bottom: 0.45rem;
+            width: 100%;
+            box-sizing: border-box;
+            padding-right: 0.2rem;
+        }}
+
+        .evidence-topline > div:first-child {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.45rem;
+            min-width: 0;
+            flex: 1 1 auto;
         }}
 
         .chunk-pill {{
@@ -435,22 +546,35 @@ def inject_styles() -> None:
         }}
 
         .chunk-score {{
+            flex: 0 0 auto;
+            min-width: 6.8rem;
+            padding-right: 0.25rem;
             font-size: 0.74rem;
             font-weight: 800;
             color: {PALETTE["teal"]};
+            text-align: right;
+            white-space: nowrap;
         }}
 
         .chunk-company {{
-            font-size: 0.9rem;
+            font-size: 0.94rem;
             font-weight: 800;
             color: {PALETTE["ink"]};
-            margin-bottom: 0.28rem;
+            margin-bottom: 0.32rem;
+            text-align: left;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }}
 
         .chunk-text {{
-            font-size: 0.84rem;
-            line-height: 1.5;
+            font-size: 0.86rem;
+            line-height: 1.6;
             color: {PALETTE["muted"]};
+            text-align: left;
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }}
 
         .legend-wrap {{
@@ -483,17 +607,36 @@ def inject_styles() -> None:
             background: rgba(255, 255, 255, 0.86);
             border: 1px solid {PALETTE["border"]};
             border-radius: 24px;
+            width: 100%;
+            max-width: 100%;
             padding: 1rem 1rem 0.3rem;
             box-shadow: 0 16px 32px rgba(15, 23, 42, 0.07);
+            box-sizing: border-box;
             margin-bottom: 0.5rem;
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+        }}
+
+        .query-shell:hover {{
+            transform: translateY(-1px);
+            border-color: rgba(18, 137, 127, 0.18);
+            box-shadow: 0 20px 38px rgba(15, 23, 42, 0.09);
         }}
 
         .context-card {{
-            background: linear-gradient(180deg, #f8fbfc 0%, #f5f8fb 100%);
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
             border: 1px solid {PALETTE["border"]};
-            border-radius: 18px;
+            border-radius: 20px;
+            width: 100%;
+            max-width: 100%;
             padding: 0.85rem 1rem;
             margin-bottom: 0.7rem;
+            box-sizing: border-box;
+            transition: transform 160ms ease, box-shadow 160ms ease;
+        }}
+
+        .context-card:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 12px 26px rgba(15, 23, 42, 0.06);
         }}
 
         .context-label {{
@@ -503,6 +646,7 @@ def inject_styles() -> None:
             letter-spacing: 0.12em;
             color: {PALETTE["muted"]};
             margin-bottom: 0.3rem;
+            text-align: left;
         }}
 
         .context-value {{
@@ -510,6 +654,7 @@ def inject_styles() -> None:
             font-weight: 800;
             color: {PALETTE["ink"]};
             letter-spacing: -0.03em;
+            text-align: left;
         }}
 
         .context-note {{
@@ -517,14 +662,32 @@ def inject_styles() -> None:
             font-size: 0.74rem;
             line-height: 1.45;
             color: {PALETTE["muted"]};
+            text-align: left;
         }}
 
         .answer-body h3 {{
-            margin: 0.9rem 0 0.35rem;
-            font-size: 0.95rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            margin: 1rem 0 0.55rem;
+            padding: 0.42rem 0.72rem;
+            border-radius: 999px;
+            background: rgba(18, 137, 127, 0.08);
+            border: 1px solid rgba(18, 137, 127, 0.14);
+            font-size: 0.82rem;
             font-weight: 800;
             color: {PALETTE["teal"]};
-            letter-spacing: -0.03em;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }}
+
+        .answer-body h3::before {{
+            content: "";
+            display: inline-block;
+            width: 0.48rem;
+            height: 0.48rem;
+            border-radius: 999px;
+            background: linear-gradient(135deg, #12897f, #0f766e);
         }}
 
         .answer-body ul {{
@@ -534,6 +697,16 @@ def inject_styles() -> None:
 
         .answer-body li {{
             margin-bottom: 0.3rem;
+        }}
+
+        div[data-testid="stDataFrame"] {{
+            border-radius: 18px;
+            overflow: hidden;
+        }}
+
+        div[data-testid="stDataFrame"] div[role="grid"] {{
+            border: 1px solid #e3e8ef;
+            border-radius: 18px;
         }}
         </style>
         """,
@@ -564,9 +737,19 @@ def normalize_coordinate_source(source: object) -> str:
 
 
 def highlight_citations(answer: str) -> str:
-    safe_text = html.escape(answer or "No answer returned.")
+    cleaned = clean_generated_answer(answer)
+    safe_text = html.escape(cleaned or "No answer returned.")
     safe_text = reformat_answer_breaks(safe_text)
     return safe_text
+
+
+def clean_generated_answer(answer: str) -> str:
+    text = str(answer or "").strip()
+    text = re.sub(r"(?im)^\s*Question\s*:\s*.*(?:\n|$)", "", text)
+    text = re.sub(r"(?m)^\s*#{1,6}\s*$", "", text)
+    text = re.sub(r"(?m)^\s*#{1,6}\s*", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def reformat_answer_breaks(safe_text: str) -> str:
@@ -592,21 +775,18 @@ def compact_text(value: object, limit: int = 280) -> str:
 
 
 def render_header(backend_ok: bool) -> None:
-    status_label = "Pipeline Online" if backend_ok else "Pipeline Standby"
-    status_class = "status-online" if backend_ok else "status-standby"
     st.markdown(
         f"""
         <div class="hero-shell">
             <div class="hero-topline">
                 <div>
-                    <div class="hero-kicker">Hybrid GeoJSON + Geospatial RAG Platform</div>
-                    <div class="hero-title">Georgia EV Supply Chain Intelligence Dashboard</div>
+                    <div class="hero-kicker">Hybrid GeoJSON + Geospatial RAG</div>
+                    <div class="hero-title">Georgia EV Supply Chain Intelligence Chatbot</div>
                     <div class="hero-subtitle">
                         County-aware GeoJSON mapping, radius and disruption analysis, hybrid SQL + FAISS retrieval,
                         and citation-grounded LLM synthesis for Georgia EV supply-chain intelligence.
                     </div>
                 </div>
-                <div class="status-pill {status_class}">{status_label}</div>
             </div>
         </div>
         """,
@@ -638,7 +818,6 @@ def render_query_panel() -> tuple[bool, str]:
 
 
 def render_result_metrics(result: Dict) -> None:
-    plan = result.get("plan", {}) if isinstance(result.get("plan", {}), dict) else {}
     map_context = result.get("map_context", {}) if isinstance(result.get("map_context", {}), dict) else {}
     chunks = result.get("retrieved_chunks", []) or []
     companies = result.get("retrieved_companies", []) or []
@@ -649,7 +828,6 @@ def render_result_metrics(result: Dict) -> None:
     else:
         radius_label = f"{float(radius_km):.1f} km / {float(radius_km) * 0.621371:.1f} mi"
     metric_values = [
-        ("Query Plan", str(plan.get("classification", "N/A")).replace("_", " ")),
         ("Evidence Chunks", f"{len(chunks)}"),
         ("Mapped Companies", f"{len(companies)}"),
         ("County Coverage", f"{int(map_context.get('county_coverage_count') or 0)}"),
@@ -657,16 +835,15 @@ def render_result_metrics(result: Dict) -> None:
         ("Search Radius", radius_label),
         ("LLM Model", str(result.get("model_used", "unknown"))),
     ]
-    metric_html = "".join(
-        f"""
-        <div class="metric-chip">
-            <div class="metric-label">{html.escape(label)}</div>
-            <div class="metric-value">{html.escape(value)}</div>
-        </div>
-        """
-        for label, value in metric_values
-    )
-    st.markdown(f"<div class='metrics-row'>{metric_html}</div>", unsafe_allow_html=True)
+    for start in range(0, len(metric_values), 4):
+        row_items = metric_values[start : start + 4]
+        metric_cols = st.columns(4)
+        for idx, col in enumerate(metric_cols):
+            if idx < len(row_items):
+                label, value = row_items[idx]
+                col.metric(label, value)
+            else:
+                col.empty()
 
 
 def render_map_context_summary(result: Dict) -> None:
@@ -717,7 +894,7 @@ def render_answer_panel(question: str, answer: str) -> None:
         section_heading(
             "Generated Answer",
             "Evidence-Grounded Synthesis",
-            f"Question: {question}" if question else "",
+            "",
         )
         st.markdown(
             f"<div class='answer-body'>{highlight_citations(answer)}</div>",
@@ -846,12 +1023,13 @@ def render_table(records: List[Dict]) -> None:
         ]
         ordered = [c for c in preferred_cols if c in df.columns]
         display_df = df[ordered].rename(columns=rename_map).head(18)
+        table_height = min(560, max(128, 52 + (len(display_df) + 1) * 42))
 
         st.dataframe(
             display_df,
             use_container_width=True,
             hide_index=True,
-            height=430,
+            height=table_height,
             column_config={
                 "Map Weight": st.column_config.ProgressColumn("Map Weight", min_value=0.0, max_value=1.0, format="%.2f"),
                 "Distance (km)": st.column_config.NumberColumn("Distance (km)", format="%.2f"),
