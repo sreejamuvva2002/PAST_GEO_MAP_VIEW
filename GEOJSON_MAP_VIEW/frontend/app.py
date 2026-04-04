@@ -229,9 +229,12 @@ def inject_styles() -> None:
         }}
 
         [data-testid="stMainBlockContainer"] {{
-            width: calc(100% - clamp(1.5rem, 2.4vw, 2.5rem)) !important;
-            max-width: calc(100vw - 8rem) !important;
-            margin-right: clamp(1.5rem, 2.4vw, 2.5rem) !important;
+            width: 100% !important;
+            max-width: min(1960px, calc(100vw - 0.4rem)) !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+            padding-left: clamp(0.2rem, 0.3vw, 0.35rem) !important;
+            padding-right: clamp(0.2rem, 0.3vw, 0.35rem) !important;
             box-sizing: border-box !important;
             overflow-x: hidden;
         }}
@@ -241,13 +244,13 @@ def inject_styles() -> None:
         }}
 
         .block-container {{
-            width: calc(100% - clamp(1.5rem, 2.4vw, 2.5rem));
-            max-width: min(1720px, calc(100vw - 8rem));
+            width: 100%;
+            max-width: min(1960px, calc(100vw - 0.4rem));
             margin-left: auto;
-            margin-right: clamp(1.5rem, 2.4vw, 2.5rem);
+            margin-right: auto;
             padding-top: 1.25rem;
-            padding-left: clamp(1.5rem, 2.4vw, 2.5rem) !important;
-            padding-right: clamp(1.5rem, 2.4vw, 2.5rem) !important;
+            padding-left: clamp(0.2rem, 0.3vw, 0.35rem) !important;
+            padding-right: clamp(0.2rem, 0.3vw, 0.35rem) !important;
             padding-bottom: 1.6rem;
             box-sizing: border-box;
         }}
@@ -403,8 +406,8 @@ def inject_styles() -> None:
         }}
 
         button[data-testid="stBaseButton-primary"] {{
-            width: calc(100% - 0.35rem);
-            max-width: calc(100% - 0.35rem);
+            width: 100%;
+            max-width: 100%;
             border: 0;
             border-radius: 18px;
             background: linear-gradient(135deg, #12897f 0%, #0f766e 45%, #0b5f59 100%);
@@ -414,7 +417,7 @@ def inject_styles() -> None:
             letter-spacing: 0.08em;
             text-transform: uppercase;
             padding: 0.98rem 1.15rem;
-            margin-right: 0.35rem;
+            margin-right: 0;
             box-sizing: border-box;
             box-shadow: 0 14px 28px rgba(15, 118, 110, 0.22);
             transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
@@ -464,7 +467,7 @@ def inject_styles() -> None:
             color: {PALETTE["ink"]};
             letter-spacing: -0.015em;
             text-align: left;
-            padding: 0 0.1rem 0.15rem;
+            padding: 0 0.85rem 0.15rem 0.1rem;
             max-width: 100%;
             overflow-wrap: anywhere;
             word-break: break-word;
@@ -488,7 +491,7 @@ def inject_styles() -> None:
             border-radius: 20px;
             width: 100%;
             max-width: 100%;
-            padding: 0.9rem 1rem;
+            padding: 0.9rem 1.35rem 0.9rem 1rem;
             margin-bottom: 0.7rem;
             box-sizing: border-box;
             transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
@@ -508,7 +511,7 @@ def inject_styles() -> None:
             margin-bottom: 0.45rem;
             width: 100%;
             box-sizing: border-box;
-            padding-right: 0.2rem;
+            padding-right: 0.15rem;
         }}
 
         .evidence-topline > div:first-child {{
@@ -548,7 +551,7 @@ def inject_styles() -> None:
         .chunk-score {{
             flex: 0 0 auto;
             min-width: 6.8rem;
-            padding-right: 0.25rem;
+            padding-right: 0.1rem;
             font-size: 0.74rem;
             font-weight: 800;
             color: {PALETTE["teal"]};

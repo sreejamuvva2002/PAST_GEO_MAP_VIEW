@@ -1096,7 +1096,8 @@ class HybridGeospatialRAGPipeline:
         max_model_attempts = int(os.getenv("OLLAMA_MAX_MODEL_ATTEMPTS", "2"))
         model_candidates = model_candidates[:max(1, max_model_attempts)]
         last_exc: Optional[Exception] = None
-        request_timeout = float(os.getenv("OLLAMA_REQUEST_TIMEOUT_SECONDS", "35"))
+        request_timeout = float(os.getenv("OLLAMA_REQUEST_TIMEOUT_SECONDS", "60"))
+        max_output_tokens = int(os.getenv("OLLAMA_MAX_OUTPUT_TOKENS", "900"))
         for model_name in model_candidates:
             try:
                 response = self.llm_client.chat.completions.create(
@@ -1106,9 +1107,9 @@ class HybridGeospatialRAGPipeline:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=420,
+                    max_tokens=max_output_tokens,
                     timeout=request_timeout,
-                    extra_body={"options": {"num_predict": 420, "num_ctx": 4096}},
+                    extra_body={"options": {"num_predict": max_output_tokens, "num_ctx": 4096}},
                 )
                 content = self._normalize_message_text(
                     response.choices[0].message.content if response.choices else None
